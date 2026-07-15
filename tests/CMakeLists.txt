@@ -6,6 +6,9 @@ find_package(doctest CONFIG REQUIRED)
 add_executable(mcdf-tests
   test_smoke.cpp
   test_inspect.cpp
+  test_canonical_json.cpp
+  test_manifest.cpp
+  test_validate.cpp
 )
 target_link_libraries(mcdf-tests PRIVATE mcdf::mcdf doctest::doctest)
 target_compile_definitions(mcdf-tests PRIVATE

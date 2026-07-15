@@ -13,3 +13,7 @@
 #include "mcdf/model/document.hpp"
 #include "mcdf/serialize/markdown.hpp"
 #include "mcdf/serialize/parsers.hpp"
+#include "mcdf/serialize/canonical_json.hpp"
+#include "mcdf/crypto/hash.hpp"
+#include "mcdf/core/manifest_ops.hpp"
+#include "mcdf/core/validate.hpp"

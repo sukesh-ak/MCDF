@@ -20,14 +20,16 @@ void print_usage() {
       "  mcdf <command> [options]\n"
       "\n"
       "Commands:\n"
-      "  inspect <container> [--json]   Summarize a container's structure\n"
+      "  inspect  <container> [--json]         Summarize a container\n"
+      "  manifest <container> [--verify]       Build, or --verify, the manifest\n"
+      "  validate <container> [--profile P]    Validate (P: core|integrity|\n"
+      "                                        signed|encrypted|render)\n"
       "\n"
       "Global:\n"
-      "  -h, --help                     Show this help\n"
-      "  -v, --version                  Show version\n"
+      "  -h, --help                            Show this help\n"
+      "  -v, --version                         Show version\n"
       "\n"
-      "Planned: validate manifest sign verify pack unpack encrypt decrypt "
-      "audit render\n";
+      "Planned: sign verify pack unpack encrypt decrypt audit render\n";
 }
 
 void print_human(const std::string& path, const mcdf::DirectoryContainer& c,
@@ -170,6 +172,131 @@ int cmd_inspect(const std::vector<std::string>& args) {
   return 0;
 }
 
+int cmd_manifest(const std::vector<std::string>& args) {
+  std::string path;
+  bool verify = false;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--verify") {
+      verify = true;
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "usage: mcdf manifest <container> [--verify]\n";
+    return 2;
+  }
+
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) {
+    std::cerr << "error: " << container.error().message << "\n";
+    return 1;
+  }
+
+  if (!verify) {
+    auto manifest = mcdf::build_manifest(**container);
+    if (!manifest) {
+      std::cerr << "error: " << manifest.error().message << "\n";
+      return 1;
+    }
+    auto canonical = mcdf::manifest_to_canonical_json(*manifest);
+    if (!canonical) {
+      std::cerr << "error: " << canonical.error().message << "\n";
+      return 1;
+    }
+    std::cout << *canonical << "\n";
+    return 0;
+  }
+
+  if (!(*container)->contains("manifest.json")) {
+    std::cerr << "error: manifest.json not found in container\n";
+    return 1;
+  }
+  auto raw = (*container)->read("manifest.json");
+  if (!raw) {
+    std::cerr << "error: " << raw.error().message << "\n";
+    return 1;
+  }
+  auto manifest = mcdf::parse_manifest_json(*raw);
+  if (!manifest) {
+    std::cerr << "error: " << manifest.error().message << "\n";
+    return 1;
+  }
+  auto result = mcdf::verify_manifest(**container, *manifest);
+  if (!result) {
+    std::cerr << "error: " << result.error().message << "\n";
+    return 1;
+  }
+  if (result->ok) {
+    std::cout << "manifest OK (" << manifest->files.size() << " files, "
+              << manifest->hash_algorithm << ")\n";
+    return 0;
+  }
+  std::cout << "manifest FAILED\n";
+  for (const auto& p : result->mismatched) std::cout << "  mismatch: " << p << "\n";
+  for (const auto& p : result->missing)    std::cout << "  missing:  " << p << "\n";
+  for (const auto& p : result->extra)      std::cout << "  extra:    " << p << "\n";
+  return 1;
+}
+
+int cmd_validate(const std::vector<std::string>& args) {
+  std::string path;
+  std::string profile_name = "integrity";
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--profile") {
+      if (i + 1 >= args.size()) {
+        std::cerr << "--profile requires a value\n";
+        return 2;
+      }
+      profile_name = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "usage: mcdf validate <container> "
+                 "[--profile core|integrity|signed|encrypted|render]\n";
+    return 2;
+  }
+
+  auto profile = mcdf::parse_profile(profile_name);
+  if (!profile) {
+    std::cerr << "error: " << profile.error().message << "\n";
+    return 2;
+  }
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) {
+    std::cerr << "error: " << container.error().message << "\n";
+    return 1;
+  }
+  auto doc = mcdf::load_document(**container);
+  if (!doc) {
+    std::cerr << "error: " << doc.error().message << "\n";
+    return 1;
+  }
+  auto report = mcdf::validate(**container, *doc, *profile);
+  if (!report) {
+    std::cerr << "error: " << report.error().message << "\n";
+    return 1;
+  }
+
+  if (report->ok) {
+    std::cout << "validate [" << mcdf::to_string(report->profile) << "]: OK\n";
+    return 0;
+  }
+  std::cout << "validate [" << mcdf::to_string(report->profile) << "]: "
+            << report->issues.size() << " issue(s)\n";
+  for (const auto& issue : report->issues)
+    std::cout << "  " << issue.code << ": " << issue.message << "\n";
+  return 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -185,6 +312,12 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "inspect") {
     return cmd_inspect(args);
+  }
+  if (args[0] == "manifest") {
+    return cmd_manifest(args);
+  }
+  if (args[0] == "validate") {
+    return cmd_validate(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";

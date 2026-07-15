@@ -15,6 +15,10 @@ add_library(mcdf
   container/directory_container.cpp
   serialize/markdown.cpp
   serialize/parsers.cpp
+  serialize/canonical_json.cpp
+  crypto/hash.cpp
+  core/manifest_ops.cpp
+  core/validate.cpp
   model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)
