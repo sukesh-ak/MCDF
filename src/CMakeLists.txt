@@ -13,6 +13,9 @@ add_library(mcdf
   version.cpp
   error.cpp
   container/directory_container.cpp
+  container/tar.cpp
+  container/tar_container.cpp
+  container/open.cpp
   serialize/markdown.cpp
   serialize/parsers.cpp
   serialize/canonical_json.cpp
@@ -23,6 +26,7 @@ add_library(mcdf
   core/manifest_ops.cpp
   core/validate.cpp
   core/sign_ops.cpp
+  core/pack_ops.cpp
   model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)

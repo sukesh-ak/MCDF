@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -29,18 +30,22 @@ void print_usage() {
       "  keygen   --out <key.pem>              Generate an ed25519 signing key\n"
       "  sign     <container> --key <pem>      Sign the manifest (--name <n>)\n"
       "  verify   <container>                  Verify manifest + signatures\n"
+      "  pack     <container> -o <file.mcdf>   Pack into a single-file archive\n"
+      "  unpack   <file.mcdf> -o <directory>   Unpack an archive to a directory\n"
+      "\n"
+      "(inspect/validate/verify/manifest also accept a .mcdf file)\n"
       "\n"
       "Global:\n"
       "  -h, --help                            Show this help\n"
       "  -v, --version                         Show version\n"
       "\n"
-      "Planned: pack unpack encrypt decrypt audit render\n";
+      "Planned: encrypt decrypt audit render\n";
 }
 
-void print_human(const std::string& path, const mcdf::DirectoryContainer& c,
-                 const mcdf::Document& d) {
+void print_human(const std::string& path, const std::string& format,
+                 const mcdf::Container& c, const mcdf::Document& d) {
   std::cout << "MCDF container: " << path << "\n";
-  std::cout << "  format: directory\n";
+  std::cout << "  format: " << format << "\n";
   if (auto files = c.list()) {
     std::cout << "  files:  " << files->size() << "\n";
     for (const auto& f : *files) std::cout << "    - " << f << "\n";
@@ -100,9 +105,10 @@ void print_human(const std::string& path, const mcdf::DirectoryContainer& c,
   }
 }
 
-void print_json(const mcdf::DirectoryContainer& c, const mcdf::Document& d) {
+void print_json(const std::string& format, const mcdf::Container& c,
+                const mcdf::Document& d) {
   nl::json j;
-  j["format"] = "directory";
+  j["format"] = format;
   if (auto files = c.list()) j["files"] = *files;
 
   if (d.has_metadata) {
@@ -159,7 +165,7 @@ int cmd_inspect(const std::vector<std::string>& args) {
     return 2;
   }
 
-  auto container = mcdf::DirectoryContainer::open(path);
+  auto container = mcdf::open_container(path);
   if (!container) {
     std::cerr << "error: " << container.error().message << "\n";
     return 1;
@@ -170,10 +176,12 @@ int cmd_inspect(const std::vector<std::string>& args) {
     return 1;
   }
 
+  const std::string format =
+      std::filesystem::is_directory(path) ? "directory" : "archive";
   if (json)
-    print_json(**container, *doc);
+    print_json(format, **container, *doc);
   else
-    print_human(path, **container, *doc);
+    print_human(path, format, **container, *doc);
   return 0;
 }
 
@@ -195,7 +203,7 @@ int cmd_manifest(const std::vector<std::string>& args) {
     return 2;
   }
 
-  auto container = mcdf::DirectoryContainer::open(path);
+  auto container = mcdf::open_container(path);
   if (!container) {
     std::cerr << "error: " << container.error().message << "\n";
     return 1;
@@ -275,7 +283,7 @@ int cmd_validate(const std::vector<std::string>& args) {
     std::cerr << "error: " << profile.error().message << "\n";
     return 2;
   }
-  auto container = mcdf::DirectoryContainer::open(path);
+  auto container = mcdf::open_container(path);
   if (!container) {
     std::cerr << "error: " << container.error().message << "\n";
     return 1;
@@ -363,6 +371,7 @@ int cmd_sign(const std::vector<std::string>& args) {
     return 2;
   }
 
+  // Signing writes a signature file, so a directory container is required.
   auto container = mcdf::DirectoryContainer::open(path);
   if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
 
@@ -413,7 +422,7 @@ int cmd_verify(const std::vector<std::string>& args) {
   }
   if (path.empty()) { std::cerr << "usage: mcdf verify <container>\n"; return 2; }
 
-  auto container = mcdf::DirectoryContainer::open(path);
+  auto container = mcdf::open_container(path);
   if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
 
   bool ok = true;
@@ -462,6 +471,63 @@ int cmd_verify(const std::vector<std::string>& args) {
   return ok ? 0 : 1;
 }
 
+int cmd_pack(const std::vector<std::string>& args) {
+  std::string path, out;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "-o" || args[i] == "--output") {
+      if (i + 1 >= args.size()) { std::cerr << "-o requires a value\n"; return 2; }
+      out = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty() || out.empty()) {
+    std::cerr << "usage: mcdf pack <container> -o <file.mcdf>\n";
+    return 2;
+  }
+
+  auto container = mcdf::open_container(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+  auto archive = mcdf::pack_container(**container);
+  if (!archive) { std::cerr << "error: " << archive.error().message << "\n"; return 1; }
+
+  std::ofstream f(out, std::ios::binary | std::ios::trunc);
+  if (!f) { std::cerr << "error: cannot write " << out << "\n"; return 1; }
+  f.write(archive->data(), static_cast<std::streamsize>(archive->size()));
+  std::cout << "packed -> " << out << " (" << archive->size() << " bytes)\n";
+  return 0;
+}
+
+int cmd_unpack(const std::vector<std::string>& args) {
+  std::string file, out;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "-o" || args[i] == "--output") {
+      if (i + 1 >= args.size()) { std::cerr << "-o requires a value\n"; return 2; }
+      out = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (file.empty()) {
+      file = args[i];
+    }
+  }
+  if (file.empty() || out.empty()) {
+    std::cerr << "usage: mcdf unpack <file.mcdf> -o <directory>\n";
+    return 2;
+  }
+
+  bool ok = false;
+  const std::string bytes = read_file(file, ok);
+  if (!ok) { std::cerr << "error: cannot read " << file << "\n"; return 1; }
+  auto result = mcdf::unpack_archive(bytes, out);
+  if (!result) { std::cerr << "error: " << result.error().message << "\n"; return 1; }
+  std::cout << "unpacked -> " << out << "\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -492,6 +558,12 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "verify") {
     return cmd_verify(args);
+  }
+  if (args[0] == "pack") {
+    return cmd_pack(args);
+  }
+  if (args[0] == "unpack") {
+    return cmd_unpack(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";
