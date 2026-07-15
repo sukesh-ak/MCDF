@@ -17,8 +17,12 @@ add_library(mcdf
   serialize/parsers.cpp
   serialize/canonical_json.cpp
   crypto/hash.cpp
+  crypto/encoding.cpp
+  crypto/keys.cpp
+  crypto/jws.cpp
   core/manifest_ops.cpp
   core/validate.cpp
+  core/sign_ops.cpp
   model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)

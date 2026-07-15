@@ -24,6 +24,10 @@ class DirectoryContainer : public Container {
   Result<std::string> read(std::string_view rel_path) const override;
   Result<std::vector<std::string>> list() const override;
 
+  // Writes a member, creating parent directories as needed (e.g. signatures/).
+  // Path-escape guarded like read(). Not part of the read-only Container base.
+  Result<void> write(std::string_view rel_path, std::string_view bytes) const;
+
   const std::filesystem::path& root() const noexcept { return root_; }
 
  private:

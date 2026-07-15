@@ -4,7 +4,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -24,12 +26,15 @@ void print_usage() {
       "  manifest <container> [--verify]       Build, or --verify, the manifest\n"
       "  validate <container> [--profile P]    Validate (P: core|integrity|\n"
       "                                        signed|encrypted|render)\n"
+      "  keygen   --out <key.pem>              Generate an ed25519 signing key\n"
+      "  sign     <container> --key <pem>      Sign the manifest (--name <n>)\n"
+      "  verify   <container>                  Verify manifest + signatures\n"
       "\n"
       "Global:\n"
       "  -h, --help                            Show this help\n"
       "  -v, --version                         Show version\n"
       "\n"
-      "Planned: sign verify pack unpack encrypt decrypt audit render\n";
+      "Planned: pack unpack encrypt decrypt audit render\n";
 }
 
 void print_human(const std::string& path, const mcdf::DirectoryContainer& c,
@@ -297,6 +302,166 @@ int cmd_validate(const std::vector<std::string>& args) {
   return 1;
 }
 
+std::string read_file(const std::string& path, bool& ok) {
+  std::ifstream in(path, std::ios::binary);
+  ok = static_cast<bool>(in);
+  if (!ok) return {};
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
+int cmd_keygen(const std::vector<std::string>& args) {
+  std::string out;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--out") {
+      if (i + 1 >= args.size()) { std::cerr << "--out requires a value\n"; return 2; }
+      out = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    }
+  }
+  if (out.empty()) {
+    std::cerr << "usage: mcdf keygen --out <private-key.pem>\n";
+    return 2;
+  }
+
+  auto key = mcdf::PrivateKey::generate_ed25519();
+  if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+  auto pem = key->to_pem();
+  if (!pem) { std::cerr << "error: " << pem.error().message << "\n"; return 1; }
+
+  std::ofstream f(out, std::ios::binary | std::ios::trunc);
+  if (!f) { std::cerr << "error: cannot write " << out << "\n"; return 1; }
+  f << *pem;
+  f.close();
+
+  auto did = key->did_key();
+  if (!did) { std::cerr << "error: " << did.error().message << "\n"; return 1; }
+  std::cout << *did << "\n";
+  return 0;
+}
+
+int cmd_sign(const std::vector<std::string>& args) {
+  std::string path, keyfile, name = "author";
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--key") {
+      if (i + 1 >= args.size()) { std::cerr << "--key requires a value\n"; return 2; }
+      keyfile = args[++i];
+    } else if (args[i] == "--name") {
+      if (i + 1 >= args.size()) { std::cerr << "--name requires a value\n"; return 2; }
+      name = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty() || keyfile.empty()) {
+    std::cerr << "usage: mcdf sign <container> --key <pem> [--name <n>]\n";
+    return 2;
+  }
+
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+
+  // Only sign a container whose manifest matches its content.
+  if (!(*container)->contains("manifest.json")) {
+    std::cerr << "error: manifest.json not found; run 'mcdf manifest' first\n";
+    return 1;
+  }
+  auto raw = (*container)->read("manifest.json");
+  if (!raw) { std::cerr << "error: " << raw.error().message << "\n"; return 1; }
+  auto manifest = mcdf::parse_manifest_json(*raw);
+  if (!manifest) { std::cerr << "error: " << manifest.error().message << "\n"; return 1; }
+  auto integrity = mcdf::verify_manifest(**container, *manifest);
+  if (!integrity) { std::cerr << "error: " << integrity.error().message << "\n"; return 1; }
+  if (!integrity->ok) {
+    std::cerr << "error: manifest does not match content; re-run 'mcdf manifest'\n";
+    return 1;
+  }
+
+  bool ok = false;
+  const std::string pem = read_file(keyfile, ok);
+  if (!ok) { std::cerr << "error: cannot read key " << keyfile << "\n"; return 1; }
+  auto key = mcdf::PrivateKey::from_pem(pem);
+  if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+  auto kid = key->did_key();
+  if (!kid) { std::cerr << "error: " << kid.error().message << "\n"; return 1; }
+
+  auto jws = mcdf::sign_container(**container, *key, *kid);
+  if (!jws) { std::cerr << "error: " << jws.error().message << "\n"; return 1; }
+
+  const std::string sig_path = "signatures/" + name + ".sig";
+  auto written = (*container)->write(sig_path, *jws);
+  if (!written) { std::cerr << "error: " << written.error().message << "\n"; return 1; }
+
+  std::cout << "signed by " << *kid << "\n  -> " << sig_path << "\n";
+  return 0;
+}
+
+int cmd_verify(const std::vector<std::string>& args) {
+  std::string path;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty()) { std::cerr << "usage: mcdf verify <container>\n"; return 2; }
+
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+
+  bool ok = true;
+
+  if (!(*container)->contains("manifest.json")) {
+    std::cout << "manifest: MISSING\n";
+    ok = false;
+  } else {
+    auto raw = (*container)->read("manifest.json");
+    if (!raw) { std::cerr << "error: " << raw.error().message << "\n"; return 1; }
+    auto manifest = mcdf::parse_manifest_json(*raw);
+    if (!manifest) { std::cerr << "error: " << manifest.error().message << "\n"; return 1; }
+    auto integrity = mcdf::verify_manifest(**container, *manifest);
+    if (!integrity) { std::cerr << "error: " << integrity.error().message << "\n"; return 1; }
+    if (integrity->ok) {
+      std::cout << "manifest: OK (" << manifest->files.size() << " files)\n";
+    } else {
+      std::cout << "manifest: FAILED\n";
+      ok = false;
+      for (const auto& p : integrity->mismatched) std::cout << "  mismatch: " << p << "\n";
+      for (const auto& p : integrity->missing)    std::cout << "  missing:  " << p << "\n";
+      for (const auto& p : integrity->extra)      std::cout << "  extra:    " << p << "\n";
+    }
+  }
+
+  auto checks = mcdf::verify_container(**container);
+  if (!checks) { std::cerr << "error: " << checks.error().message << "\n"; return 1; }
+  if (checks->empty()) {
+    std::cout << "signatures: NONE\n";
+    ok = false;
+  } else {
+    for (const auto& c : *checks) {
+      if (c.valid) {
+        std::cout << "signature " << c.file << ": VALID (" << c.alg << ", "
+                  << c.kid << ")\n";
+      } else {
+        std::cout << "signature " << c.file << ": INVALID";
+        if (!c.error.empty()) std::cout << " (" << c.error << ")";
+        std::cout << "\n";
+        ok = false;
+      }
+    }
+  }
+
+  std::cout << (ok ? "verify: OK\n" : "verify: FAILED\n");
+  return ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -318,6 +483,15 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "validate") {
     return cmd_validate(args);
+  }
+  if (args[0] == "keygen") {
+    return cmd_keygen(args);
+  }
+  if (args[0] == "sign") {
+    return cmd_sign(args);
+  }
+  if (args[0] == "verify") {
+    return cmd_verify(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";

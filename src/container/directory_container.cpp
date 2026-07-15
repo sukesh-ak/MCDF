@@ -62,6 +62,24 @@ Result<std::string> DirectoryContainer::read(std::string_view rel_path) const {
   return data;
 }
 
+Result<void> DirectoryContainer::write(std::string_view rel_path,
+                                       std::string_view bytes) const {
+  auto p = resolve(rel_path);
+  if (!p) return std::unexpected(p.error());
+
+  std::error_code ec;
+  fs::create_directories(p->parent_path(), ec);
+  std::ofstream out(*p, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    return fail(ErrorCode::kIo, "cannot write member: " + std::string(rel_path));
+  }
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!out) {
+    return fail(ErrorCode::kIo, "write failed: " + std::string(rel_path));
+  }
+  return {};
+}
+
 Result<std::vector<std::string>> DirectoryContainer::list() const {
   std::vector<std::string> out;
   std::error_code ec;
