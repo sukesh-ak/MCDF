@@ -8,8 +8,12 @@ This repository holds the **specification** and the **primary C++ runtime**.
 
 - **Spec:** [`spec/`](spec/) — the format definition (RFC).
 - **Runtime:** the C++ library `libmcdf` (`src/`, `include/`) and clients (`apps/`).
+- **Conformance kit:** [`conformance/`](conformance/) — JSON Schemas, known-answer
+  test vectors, an error taxonomy, and a runner that scores *any* implementation.
 - **Open by design:** `.mcdf` is re-implementable in any language from the spec
   and the conformance kit; the C++ runtime is the canonical one, not a gate.
+  Reading, writing and modifying a document needs **no cryptography** — a
+  container is just Markdown + YAML + JSON.
 
 ## Status
 
@@ -20,11 +24,20 @@ Early development. The format is specified; the runtime is being built in phases
 
 ```
 spec/          the MCDF specification (CSL-1.0)
+conformance/   schemas, test vectors, error taxonomy, runner
 include/mcdf/  public library headers
 src/           libmcdf implementation (the engine)
 apps/          clients built on libmcdf
   cli/           the `mcdf` command-line client
 tests/         unit / determinism / conformance tests
+```
+
+## Implementing MCDF in another language
+
+Start with [`conformance/GUIDE.md`](conformance/GUIDE.md), then score yourself:
+
+```sh
+./conformance/run.sh /path/to/your-cli
 ```
 
 ## Build

@@ -1,0 +1,5 @@
+{
+  "description": "A minimal well-formed container: schema sections bind to headings and every hash matches.",
+  "profile": "integrity",
+  "expect": "pass"
+}

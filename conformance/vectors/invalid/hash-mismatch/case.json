@@ -1,0 +1,6 @@
+{
+  "description": "content.md was modified after the manifest was built.",
+  "profile": "integrity",
+  "expect": "fail",
+  "error": "E_MANIFEST_HASH_MISMATCH"
+}

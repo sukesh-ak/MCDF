@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcdf.dev/schemas/manifest.schema.json",
+  "title": "MCDF manifest.json",
+  "description": "Cryptographic inventory of a container. Hashes cover ciphertext for encrypted members, so integrity is verifiable without decryption.",
+  "type": "object",
+  "required": ["mcdf_version", "hash_algorithm", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "mcdf_version": {
+      "type": "string",
+      "description": "MCDF format version.",
+      "examples": ["1.0"]
+    },
+    "hash_algorithm": {
+      "type": "string",
+      "description": "Digest used for every entry in `files`.",
+      "enum": ["sha256"]
+    },
+    "files": {
+      "type": "object",
+      "description": "Map of container-relative path to lowercase hex digest. Excludes manifest.json, audit.log, audit.checkpoint and signatures/*.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?!/)(?!.*\\.\\.).+$",
+        "description": "Relative path, forward slashes, no leading / and no '..' segment."
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "Lowercase hex SHA-256."
+      }
+    }
+  }
+}

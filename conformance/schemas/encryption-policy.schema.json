@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcdf.dev/schemas/encryption-policy.schema.json",
+  "title": "MCDF encryption/policy.yaml",
+  "description": "Declares what is encrypted and how the content-encryption key (CEK) is wrapped per recipient. Key material is never stored in plaintext.",
+  "type": "object",
+  "required": ["method", "key_management", "encrypted_files", "recipients"],
+  "properties": {
+    "method": {
+      "type": "string",
+      "enum": ["aes-256-gcm"],
+      "description": "Content encryption. Each file is stored as nonce(12) || ciphertext || tag(16), with the member path as AAD."
+    },
+    "key_management": {
+      "type": "string",
+      "enum": ["hpke"],
+      "description": "CEK wrapping. hpke = RFC 9180 base mode, DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/AES-256-GCM."
+    },
+    "encrypted_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Container-relative paths whose bytes are ciphertext."
+    },
+    "recipients": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "enc", "wrapped_key"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Recipient X25519 did:key (z6LS... prefix)."
+          },
+          "enc": {
+            "type": "string",
+            "description": "base64url HPKE encapsulated key."
+          },
+          "wrapped_key": {
+            "type": "string",
+            "description": "base64url HPKE-sealed CEK."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -21,3 +21,11 @@ target_compile_definitions(mcdf-tests PRIVATE
   MCDF_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 add_test(NAME mcdf-tests COMMAND mcdf-tests)
+
+# Score the built CLI against the published conformance vectors, exactly as an
+# independent implementation would be scored.
+find_program(MCDF_SH sh)
+if(MCDF_SH)
+  add_test(NAME mcdf-conformance
+    COMMAND ${MCDF_SH} ${CMAKE_SOURCE_DIR}/conformance/run.sh $<TARGET_FILE:mcdf-cli>)
+endif()

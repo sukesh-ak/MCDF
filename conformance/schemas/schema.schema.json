@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcdf.dev/schemas/schema.schema.json",
+  "title": "MCDF schema.yaml",
+  "description": "Logical document structure. Every section id MUST correspond to a heading identifier ({#id}) in content.md.",
+  "type": "object",
+  "required": ["document_type"],
+  "properties": {
+    "document_type": {
+      "type": "string",
+      "description": "Machine-readable document kind.",
+      "examples": ["contract", "report", "memo"]
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "description": "Must match a heading {#id} in content.md."
+          },
+          "title": { "type": "string" },
+          "required": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, a missing heading raises E_REQUIRED_SECTION_MISSING."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

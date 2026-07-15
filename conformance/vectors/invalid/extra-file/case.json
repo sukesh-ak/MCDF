@@ -1,0 +1,6 @@
+{
+  "description": "A non-excluded file is present but not listed in the manifest.",
+  "profile": "integrity",
+  "expect": "fail",
+  "error": "E_MANIFEST_EXTRA_FILE"
+}

@@ -1,0 +1,7 @@
+document_type: contract
+sections:
+  - id: overview
+    title: Overview
+  - id: terms
+    title: Terms
+    required: true

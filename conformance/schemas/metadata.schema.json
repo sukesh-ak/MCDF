@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcdf.dev/schemas/metadata.schema.json",
+  "title": "MCDF metadata.yaml",
+  "description": "Descriptive and operational metadata. YAML validates against this schema once parsed to JSON.",
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "version": {
+      "type": "string",
+      "description": "Semantic version recommended.",
+      "examples": ["1.2.0"]
+    },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier, typically a DID.",
+            "examples": ["did:key:z6MkExample"]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "description": "RFC 3339 date or date-time."
+    },
+    "classification": { "type": "string" },
+    "language": {
+      "type": "string",
+      "description": "BCP 47 language tag.",
+      "examples": ["en"]
+    },
+    "generated_by": {
+      "type": "string",
+      "description": "Provenance marker for AI-generated or AI-modified content."
+    }
+  },
+  "additionalProperties": true
+}
