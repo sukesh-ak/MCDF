@@ -27,11 +27,13 @@ void print_usage() {
       "  manifest <container> [--verify]       Build, or --verify, the manifest\n"
       "  validate <container> [--profile P]    Validate (P: core|integrity|\n"
       "                                        signed|encrypted|render)\n"
-      "  keygen   --out <key.pem>              Generate an ed25519 signing key\n"
+      "  keygen   --out <key.pem> [--type T]   Generate a key (T: ed25519|x25519)\n"
       "  sign     <container> --key <pem>      Sign the manifest (--name <n>)\n"
       "  verify   <container>                  Verify manifest + signatures\n"
       "  pack     <container> -o <file.mcdf>   Pack into a single-file archive\n"
       "  unpack   <file.mcdf> -o <directory>   Unpack an archive to a directory\n"
+      "  encrypt  <container> --recipient <did>  Encrypt files (--file <p>)\n"
+      "  decrypt  <container> --key <x25519.pem> Decrypt files\n"
       "\n"
       "(inspect/validate/verify/manifest also accept a .mcdf file)\n"
       "\n"
@@ -39,7 +41,7 @@ void print_usage() {
       "  -h, --help                            Show this help\n"
       "  -v, --version                         Show version\n"
       "\n"
-      "Planned: encrypt decrypt audit render\n";
+      "Planned: audit render\n";
 }
 
 void print_human(const std::string& path, const std::string& format,
@@ -319,34 +321,126 @@ std::string read_file(const std::string& path, bool& ok) {
 }
 
 int cmd_keygen(const std::vector<std::string>& args) {
-  std::string out;
+  std::string out, type = "ed25519";
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--out") {
       if (i + 1 >= args.size()) { std::cerr << "--out requires a value\n"; return 2; }
       out = args[++i];
+    } else if (args[i] == "--type") {
+      if (i + 1 >= args.size()) { std::cerr << "--type requires a value\n"; return 2; }
+      type = args[++i];
     } else if (!args[i].empty() && args[i][0] == '-') {
       std::cerr << "unknown option: " << args[i] << "\n";
       return 2;
     }
   }
   if (out.empty()) {
-    std::cerr << "usage: mcdf keygen --out <private-key.pem>\n";
+    std::cerr << "usage: mcdf keygen --out <key.pem> [--type ed25519|x25519]\n";
     return 2;
   }
 
-  auto key = mcdf::PrivateKey::generate_ed25519();
-  if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
-  auto pem = key->to_pem();
-  if (!pem) { std::cerr << "error: " << pem.error().message << "\n"; return 1; }
+  std::string pem, did;
+  if (type == "ed25519") {  // signing key
+    auto key = mcdf::PrivateKey::generate_ed25519();
+    if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+    auto p = key->to_pem();
+    auto d = key->did_key();
+    if (!p) { std::cerr << "error: " << p.error().message << "\n"; return 1; }
+    if (!d) { std::cerr << "error: " << d.error().message << "\n"; return 1; }
+    pem = *p;
+    did = *d;
+  } else if (type == "x25519") {  // encryption key
+    auto key = mcdf::EncPrivateKey::generate_x25519();
+    if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+    auto p = key->to_pem();
+    auto d = key->did_key();
+    if (!p) { std::cerr << "error: " << p.error().message << "\n"; return 1; }
+    if (!d) { std::cerr << "error: " << d.error().message << "\n"; return 1; }
+    pem = *p;
+    did = *d;
+  } else {
+    std::cerr << "error: unknown key type '" << type << "' (ed25519|x25519)\n";
+    return 2;
+  }
 
   std::ofstream f(out, std::ios::binary | std::ios::trunc);
   if (!f) { std::cerr << "error: cannot write " << out << "\n"; return 1; }
-  f << *pem;
+  f << pem;
   f.close();
+  std::cout << did << "\n";
+  return 0;
+}
 
-  auto did = key->did_key();
-  if (!did) { std::cerr << "error: " << did.error().message << "\n"; return 1; }
-  std::cout << *did << "\n";
+int cmd_encrypt(const std::vector<std::string>& args) {
+  std::string path;
+  std::vector<std::string> recipient_dids, files;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--recipient") {
+      if (i + 1 >= args.size()) { std::cerr << "--recipient requires a value\n"; return 2; }
+      recipient_dids.push_back(args[++i]);
+    } else if (args[i] == "--file") {
+      if (i + 1 >= args.size()) { std::cerr << "--file requires a value\n"; return 2; }
+      files.push_back(args[++i]);
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty() || recipient_dids.empty()) {
+    std::cerr << "usage: mcdf encrypt <container> --recipient <did> [--file <path>]...\n";
+    return 2;
+  }
+  if (files.empty()) files.push_back("content.md");
+
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+
+  std::vector<mcdf::EncPublicKey> recipients;
+  for (const auto& did : recipient_dids) {
+    auto pk = mcdf::EncPublicKey::from_did_key(did);
+    if (!pk) { std::cerr << "error: " << pk.error().message << "\n"; return 1; }
+    recipients.push_back(*pk);
+  }
+
+  auto result = mcdf::encrypt_container(**container, files, recipients);
+  if (!result) { std::cerr << "error: " << result.error().message << "\n"; return 1; }
+  std::cout << "encrypted " << files.size() << " file(s) for "
+            << recipients.size() << " recipient(s)\n";
+  return 0;
+}
+
+int cmd_decrypt(const std::vector<std::string>& args) {
+  std::string path, keyfile;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--key") {
+      if (i + 1 >= args.size()) { std::cerr << "--key requires a value\n"; return 2; }
+      keyfile = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty() || keyfile.empty()) {
+    std::cerr << "usage: mcdf decrypt <container> --key <x25519-key.pem>\n";
+    return 2;
+  }
+
+  auto container = mcdf::DirectoryContainer::open(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+
+  bool ok = false;
+  const std::string pem = read_file(keyfile, ok);
+  if (!ok) { std::cerr << "error: cannot read key " << keyfile << "\n"; return 1; }
+  auto key = mcdf::EncPrivateKey::from_pem(pem);
+  if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+
+  auto result = mcdf::decrypt_container(**container, *key);
+  if (!result) { std::cerr << "error: " << result.error().message << "\n"; return 1; }
+  std::cout << "decrypted\n";
   return 0;
 }
 
@@ -564,6 +658,12 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "unpack") {
     return cmd_unpack(args);
+  }
+  if (args[0] == "encrypt") {
+    return cmd_encrypt(args);
+  }
+  if (args[0] == "decrypt") {
+    return cmd_decrypt(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";

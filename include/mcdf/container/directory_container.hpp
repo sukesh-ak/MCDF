@@ -28,6 +28,9 @@ class DirectoryContainer : public Container {
   // Path-escape guarded like read(). Not part of the read-only Container base.
   Result<void> write(std::string_view rel_path, std::string_view bytes) const;
 
+  // Removes a member; also removes its parent directory if it becomes empty.
+  Result<void> remove(std::string_view rel_path) const;
+
   const std::filesystem::path& root() const noexcept { return root_; }
 
  private:

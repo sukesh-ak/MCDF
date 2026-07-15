@@ -19,14 +19,18 @@ add_library(mcdf
   serialize/markdown.cpp
   serialize/parsers.cpp
   serialize/canonical_json.cpp
+  serialize/policy_yaml.cpp
   crypto/hash.cpp
   crypto/encoding.cpp
   crypto/keys.cpp
   crypto/jws.cpp
+  crypto/aead.cpp
+  crypto/enc_keys.cpp
   core/manifest_ops.cpp
   core/validate.cpp
   core/sign_ops.cpp
   core/pack_ops.cpp
+  core/encrypt_ops.cpp
   model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)

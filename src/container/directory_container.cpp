@@ -80,6 +80,15 @@ Result<void> DirectoryContainer::write(std::string_view rel_path,
   return {};
 }
 
+Result<void> DirectoryContainer::remove(std::string_view rel_path) const {
+  auto p = resolve(rel_path);
+  if (!p) return std::unexpected(p.error());
+  std::error_code ec;
+  fs::remove(*p, ec);
+  fs::remove(p->parent_path(), ec);  // removes only if now empty; ignore errors
+  return {};
+}
+
 Result<std::vector<std::string>> DirectoryContainer::list() const {
   std::vector<std::string> out;
   std::error_code ec;
