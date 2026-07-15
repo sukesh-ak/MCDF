@@ -17,6 +17,7 @@
 #include "mcdf/model/audit.hpp"
 #include "mcdf/serialize/markdown.hpp"
 #include "mcdf/serialize/audit_log.hpp"
+#include "mcdf/serialize/render.hpp"
 #include "mcdf/serialize/parsers.hpp"
 #include "mcdf/serialize/canonical_json.hpp"
 #include "mcdf/crypto/hash.hpp"
@@ -33,3 +34,4 @@
 #include "mcdf/core/pack_ops.hpp"
 #include "mcdf/core/encrypt_ops.hpp"
 #include "mcdf/core/audit_ops.hpp"
+#include "mcdf/core/render.hpp"

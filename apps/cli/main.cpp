@@ -36,14 +36,15 @@ void print_usage() {
       "  encrypt  <container> --recipient <did>  Encrypt files (--file <p>)\n"
       "  decrypt  <container> --key <x25519.pem> Decrypt files\n"
       "  audit    <container> [--append <ACTION>] Verify or append to audit.log\n"
+      "  render   <html|text> <container> [-o]  Render content to HTML or text\n"
       "\n"
-      "(inspect/validate/verify/manifest/audit also accept a .mcdf file)\n"
+      "(inspect/validate/verify/manifest/audit/render also accept a .mcdf file)\n"
       "\n"
       "Global:\n"
       "  -h, --help                            Show this help\n"
       "  -v, --version                         Show version\n"
       "\n"
-      "Planned: render\n";
+      "Rendering to PDF/DOCX is planned for a future release.\n";
 }
 
 void print_human(const std::string& path, const std::string& format,
@@ -708,6 +709,46 @@ int cmd_audit(const std::vector<std::string>& args) {
   return v->ok ? 0 : 1;
 }
 
+int cmd_render(const std::vector<std::string>& args) {
+  std::string format_name, path, out;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "-o" || args[i] == "--output") {
+      if (i + 1 >= args.size()) { std::cerr << "-o requires a value\n"; return 2; }
+      out = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (format_name.empty()) {
+      format_name = args[i];
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (format_name.empty() || path.empty()) {
+    std::cerr << "usage: mcdf render <html|text> <container> [-o <file>]\n";
+    return 2;
+  }
+
+  auto format = mcdf::parse_render_format(format_name);
+  if (!format) { std::cerr << "error: " << format.error().message << "\n"; return 2; }
+
+  auto container = mcdf::open_container(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+
+  auto rendered = mcdf::render(**container, *format);
+  if (!rendered) { std::cerr << "error: " << rendered.error().message << "\n"; return 1; }
+
+  if (out.empty()) {
+    std::cout << *rendered;
+  } else {
+    std::ofstream f(out, std::ios::binary | std::ios::trunc);
+    if (!f) { std::cerr << "error: cannot write " << out << "\n"; return 1; }
+    f.write(rendered->data(), static_cast<std::streamsize>(rendered->size()));
+    std::cout << "rendered -> " << out << "\n";
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -753,6 +794,9 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "audit") {
     return cmd_audit(args);
+  }
+  if (args[0] == "render") {
+    return cmd_render(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";
