@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,14 +35,15 @@ void print_usage() {
       "  unpack   <file.mcdf> -o <directory>   Unpack an archive to a directory\n"
       "  encrypt  <container> --recipient <did>  Encrypt files (--file <p>)\n"
       "  decrypt  <container> --key <x25519.pem> Decrypt files\n"
+      "  audit    <container> [--append <ACTION>] Verify or append to audit.log\n"
       "\n"
-      "(inspect/validate/verify/manifest also accept a .mcdf file)\n"
+      "(inspect/validate/verify/manifest/audit also accept a .mcdf file)\n"
       "\n"
       "Global:\n"
       "  -h, --help                            Show this help\n"
       "  -v, --version                         Show version\n"
       "\n"
-      "Planned: audit render\n";
+      "Planned: render\n";
 }
 
 void print_human(const std::string& path, const std::string& format,
@@ -318,6 +320,14 @@ std::string read_file(const std::string& path, bool& ok) {
   if (!ok) return {};
   return std::string((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
+}
+
+std::string now_rfc3339() {
+  const std::time_t t = std::time(nullptr);
+  const std::tm* tm = std::gmtime(&t);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", tm);
+  return buf;
 }
 
 int cmd_keygen(const std::vector<std::string>& args) {
@@ -622,6 +632,82 @@ int cmd_unpack(const std::vector<std::string>& args) {
   return 0;
 }
 
+int cmd_audit(const std::vector<std::string>& args) {
+  std::string path, append_action, actor = "unknown", keyfile;
+  bool checkpoint = false;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--append") {
+      if (i + 1 >= args.size()) { std::cerr << "--append requires a value\n"; return 2; }
+      append_action = args[++i];
+    } else if (args[i] == "--actor") {
+      if (i + 1 >= args.size()) { std::cerr << "--actor requires a value\n"; return 2; }
+      actor = args[++i];
+    } else if (args[i] == "--checkpoint") {
+      checkpoint = true;
+    } else if (args[i] == "--key") {
+      if (i + 1 >= args.size()) { std::cerr << "--key requires a value\n"; return 2; }
+      keyfile = args[++i];
+    } else if (!args[i].empty() && args[i][0] == '-') {
+      std::cerr << "unknown option: " << args[i] << "\n";
+      return 2;
+    } else if (path.empty()) {
+      path = args[i];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "usage: mcdf audit <container> [--append <ACTION> [--actor <n>]]"
+                 " [--checkpoint --key <ed25519.pem>]\n";
+    return 2;
+  }
+
+  if (!append_action.empty()) {  // append mode
+    auto dir = mcdf::DirectoryContainer::open(path);
+    if (!dir) { std::cerr << "error: " << dir.error().message << "\n"; return 1; }
+    auto r = mcdf::audit_append(**dir, append_action, actor, now_rfc3339());
+    if (!r) { std::cerr << "error: " << r.error().message << "\n"; return 1; }
+    std::cout << "appended: " << append_action << " by " << actor << "\n";
+    return 0;
+  }
+
+  if (checkpoint) {  // checkpoint mode
+    if (keyfile.empty()) { std::cerr << "--checkpoint requires --key <ed25519.pem>\n"; return 2; }
+    auto dir = mcdf::DirectoryContainer::open(path);
+    if (!dir) { std::cerr << "error: " << dir.error().message << "\n"; return 1; }
+    bool ok = false;
+    const std::string pem = read_file(keyfile, ok);
+    if (!ok) { std::cerr << "error: cannot read key " << keyfile << "\n"; return 1; }
+    auto key = mcdf::PrivateKey::from_pem(pem);
+    if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
+    auto kid = key->did_key();
+    if (!kid) { std::cerr << "error: " << kid.error().message << "\n"; return 1; }
+    auto r = mcdf::audit_checkpoint(**dir, *key, *kid);
+    if (!r) { std::cerr << "error: " << r.error().message << "\n"; return 1; }
+    std::cout << "checkpoint written (head signed by " << *kid << ")\n";
+    return 0;
+  }
+
+  // verify mode (default)
+  auto container = mcdf::open_container(path);
+  if (!container) { std::cerr << "error: " << container.error().message << "\n"; return 1; }
+  auto entries = mcdf::read_audit_log(**container);
+  if (!entries) { std::cerr << "error: " << entries.error().message << "\n"; return 1; }
+  for (const auto& e : *entries)
+    std::cout << "  " << e.timestamp << "  " << e.action << "  " << e.actor << "\n";
+  auto v = mcdf::audit_verify(**container);
+  if (!v) { std::cerr << "error: " << v.error().message << "\n"; return 1; }
+  std::cout << "audit: " << (v->ok ? "OK" : "FAILED") << " (" << v->entries
+            << " entries)";
+  if (!v->ok) std::cout << " - " << v->error;
+  std::cout << "\n";
+
+  auto cp = mcdf::audit_verify_checkpoint(**container);
+  if (cp && cp->present)
+    std::cout << "checkpoint: " << (cp->valid ? "VALID" : "INVALID") << " ("
+              << cp->kid << ")\n";
+
+  return v->ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -664,6 +750,9 @@ int main(int argc, char** argv) {
   }
   if (args[0] == "decrypt") {
     return cmd_decrypt(args);
+  }
+  if (args[0] == "audit") {
+    return cmd_audit(args);
   }
 
   std::cerr << "unknown command: " << args[0] << "\n\n";

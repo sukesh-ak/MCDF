@@ -13,6 +13,7 @@ add_executable(mcdf-tests
   test_sign.cpp
   test_pack.cpp
   test_encrypt.cpp
+  test_audit.cpp
 )
 target_link_libraries(mcdf-tests PRIVATE mcdf::mcdf doctest::doctest)
 target_compile_definitions(mcdf-tests PRIVATE

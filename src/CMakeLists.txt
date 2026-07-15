@@ -20,6 +20,7 @@ add_library(mcdf
   serialize/parsers.cpp
   serialize/canonical_json.cpp
   serialize/policy_yaml.cpp
+  serialize/audit_log.cpp
   crypto/hash.cpp
   crypto/encoding.cpp
   crypto/keys.cpp
@@ -31,6 +32,7 @@ add_library(mcdf
   core/sign_ops.cpp
   core/pack_ops.cpp
   core/encrypt_ops.cpp
+  core/audit_ops.cpp
   model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)

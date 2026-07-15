@@ -31,6 +31,9 @@ class DirectoryContainer : public Container {
   // Removes a member; also removes its parent directory if it becomes empty.
   Result<void> remove(std::string_view rel_path) const;
 
+  // Appends bytes to a member (append-only writes, e.g. audit.log).
+  Result<void> append(std::string_view rel_path, std::string_view bytes) const;
+
   const std::filesystem::path& root() const noexcept { return root_; }
 
  private:

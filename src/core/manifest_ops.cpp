@@ -14,7 +14,7 @@ namespace mcdf {
 
 bool is_manifest_excluded(std::string_view rel_path) {
   return rel_path == "manifest.json" || rel_path == "audit.log" ||
-         rel_path.starts_with("signatures/");
+         rel_path == "audit.checkpoint" || rel_path.starts_with("signatures/");
 }
 
 Result<Manifest> build_manifest(const Container& container,
