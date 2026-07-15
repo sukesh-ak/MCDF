@@ -32,16 +32,25 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-
+          key: vcpkg-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-release-${{ runner.os }}-
 
       - name: Configure
         shell: bash
         run: |
+          set -eu
+          extra=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # vcpkg's default Windows triplet links OpenSSL dynamically, which
+            # would ship an exe that cannot start without loose DLLs. Build a
+            # self-contained binary instead, matching Linux/macOS.
+            extra="-DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          fi
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
             -DVCPKG_MANIFEST_FEATURES=tests \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            $extra
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -70,6 +79,24 @@ jobs:
           fi
           rm -rf "$name"
           ls -l
+
+      # Extract the archive somewhere clean and run it. Catches artifacts that
+      # only work from the build tree (e.g. missing runtime DLLs) - ctest cannot
+      # see that class of bug because it runs from the build directory.
+      - name: Verify the artifact runs standalone
+        shell: bash
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z x -o"$tmp" dist/*.zip >/dev/null
+          else
+            tar -xzf dist/*.tar.gz -C "$tmp"
+          fi
+          bin=$(find "$tmp" -type f \( -name mcdf -o -name mcdf.exe \) | head -1)
+          chmod +x "$bin" || true
+          "$bin" --version
+          "$bin" --help >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,13 +130,19 @@ jobs:
           sha256sum * > SHA256SUMS
           ls -l
 
-      - name: Create GitHub release
+      # Idempotent: re-running a release replaces its assets rather than failing.
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -eu
-          gh release create "$TAG" \
-            --title "MCDF $TAG" \
-            --generate-notes \
-            staged/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists - replacing assets"
+            gh release upload "$TAG" staged/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "MCDF $TAG" \
+              --generate-notes \
+              staged/*
+          fi
