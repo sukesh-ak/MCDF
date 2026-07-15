@@ -1,0 +1,13 @@
+# Private / internal notes — NOT part of the public spec or code.
+# Contains working research and analysis that must never be published.
+/internal/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Build output & dependencies (for future reference implementation)
+/dist/
+/build/
+node_modules/
