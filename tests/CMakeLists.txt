@@ -23,9 +23,10 @@ target_compile_definitions(mcdf-tests PRIVATE
 add_test(NAME mcdf-tests COMMAND mcdf-tests)
 
 # Score the built CLI against the published conformance vectors, exactly as an
-# independent implementation would be scored.
+# independent implementation would be scored. The runner is POSIX sh, so it is
+# registered only where a real sh is available (not on Windows).
 find_program(MCDF_SH sh)
-if(MCDF_SH)
+if(MCDF_SH AND NOT WIN32)
   add_test(NAME mcdf-conformance
     COMMAND ${MCDF_SH} ${CMAKE_SOURCE_DIR}/conformance/run.sh $<TARGET_FILE:mcdf-cli>)
 endif()
