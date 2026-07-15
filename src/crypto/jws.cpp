@@ -15,7 +15,9 @@ namespace nl = nlohmann;
 namespace mcdf {
 namespace {
 
-constexpr std::string_view kAlg = "EdDSA";
+bool alg_allowed(std::string_view alg) {
+  return alg == "EdDSA" || alg == "ES256";
+}
 
 std::vector<std::string_view> split_dots(std::string_view s) {
   std::vector<std::string_view> parts;
@@ -37,8 +39,13 @@ std::vector<std::string_view> split_dots(std::string_view s) {
 Result<std::string> jws_sign_detached(const PrivateKey& key,
                                       std::string_view payload,
                                       std::string_view kid) {
+  const std::string alg = key.jws_algorithm();
+  if (!alg_allowed(alg)) {
+    return fail(ErrorCode::kUnsupported, "unsupported signing key algorithm");
+  }
+
   nl::json header;
-  header["alg"] = std::string(kAlg);
+  header["alg"] = alg;
   header["kid"] = std::string(kid);
 
   const std::string header_b64 = base64url_encode(header.dump());
@@ -74,12 +81,16 @@ Result<JwsVerifyResult> jws_verify_detached(std::string_view compact_jws,
     return fail(ErrorCode::kParse, std::string("JWS header: ") + e.what());
   }
 
-  if (alg != kAlg) {
+  if (!alg_allowed(alg)) {
     return fail(ErrorCode::kUnsupported, "unsupported JWS alg: " + alg);
   }
 
   auto key = PublicKey::from_did_key(kid);
   if (!key) return std::unexpected(key.error());
+  // Guard against algorithm confusion: the key's type must match the header.
+  if (key->jws_algorithm() != alg) {
+    return fail(ErrorCode::kUnsupported, "JWS alg does not match key type");
+  }
 
   auto signature = base64url_decode(sig_b64);
   if (!signature) return std::unexpected(signature.error());

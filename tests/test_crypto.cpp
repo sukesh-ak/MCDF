@@ -53,6 +53,64 @@ TEST_CASE("private key survives a PEM round-trip") {
   CHECK(*a == *b);
 }
 
+TEST_CASE("ecdsa p-256 did:key round-trips and reports ES256") {
+  auto key = mcdf::PrivateKey::generate_ecdsa_p256();
+  REQUIRE(key.has_value());
+  CHECK(key->jws_algorithm() == "ES256");
+
+  auto did = key->did_key();
+  REQUIRE(did.has_value());
+  // P-256 did:keys share the zDn multibase/multicodec prefix.
+  CHECK(did->starts_with("did:key:zDn"));
+
+  auto pub = mcdf::PublicKey::from_did_key(*did);
+  REQUIRE(pub.has_value());
+  CHECK(pub->jws_algorithm() == "ES256");
+  auto pub_did = pub->did_key();
+  REQUIRE(pub_did.has_value());
+  CHECK(*pub_did == *did);  // compressed point survives the round-trip
+}
+
+TEST_CASE("ES256 signatures are raw R||S and verify") {
+  auto key = mcdf::PrivateKey::generate_ecdsa_p256();
+  REQUIRE(key.has_value());
+  auto sig = key->sign("message");
+  REQUIRE(sig.has_value());
+  CHECK(sig->size() == 64);  // JOSE raw form, not DER
+
+  auto did = key->did_key();
+  REQUIRE(did.has_value());
+  auto pub = mcdf::PublicKey::from_did_key(*did);
+  REQUIRE(pub.has_value());
+  auto valid = pub->verify("message", *sig);
+  REQUIRE(valid.has_value());
+  CHECK(*valid);
+  auto invalid = pub->verify("tampered", *sig);
+  REQUIRE(invalid.has_value());
+  CHECK_FALSE(*invalid);
+}
+
+TEST_CASE("detached JWS works with an ES256 key") {
+  auto key = mcdf::PrivateKey::generate_ecdsa_p256();
+  REQUIRE(key.has_value());
+  auto kid = key->did_key();
+  REQUIRE(kid.has_value());
+
+  const std::string payload = R"({"files":{}})";
+  auto jws = mcdf::jws_sign_detached(*key, payload, *kid);
+  REQUIRE(jws.has_value());
+
+  auto good = mcdf::jws_verify_detached(*jws, payload);
+  REQUIRE(good.has_value());
+  CHECK(good->valid);
+  CHECK(good->alg == "ES256");
+  CHECK(good->kid == *kid);
+
+  auto bad = mcdf::jws_verify_detached(*jws, payload + " ");
+  REQUIRE(bad.has_value());
+  CHECK_FALSE(bad->valid);
+}
+
 TEST_CASE("detached JWS verifies and detects tampering") {
   auto key = mcdf::PrivateKey::generate_ed25519();
   REQUIRE(key.has_value());

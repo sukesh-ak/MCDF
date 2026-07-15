@@ -13,15 +13,17 @@ struct evp_pkey_st;
 
 namespace mcdf {
 
-// An Ed25519 private (signing) key.
+// A private signing key. Ed25519 (EdDSA) and ECDSA P-256 (ES256) are supported.
 class PrivateKey {
  public:
   static Result<PrivateKey> generate_ed25519();
+  static Result<PrivateKey> generate_ecdsa_p256();
   static Result<PrivateKey> from_pem(std::string_view pem);
 
   Result<std::string> to_pem() const;         // PKCS#8 private-key PEM
   Result<std::string> did_key() const;        // did:key of the public half
-  Result<std::string> sign(std::string_view data) const;  // raw signature bytes
+  std::string jws_algorithm() const;          // "EdDSA" | "ES256" | ""
+  Result<std::string> sign(std::string_view data) const;  // JWS-format signature
 
  private:
   explicit PrivateKey(std::shared_ptr<evp_pkey_st> key) : pkey_(std::move(key)) {}
@@ -34,6 +36,7 @@ class PublicKey {
   static Result<PublicKey> from_did_key(std::string_view did);
 
   Result<std::string> did_key() const;
+  std::string jws_algorithm() const;  // "EdDSA" | "ES256" | ""
   // Returns true iff signature is valid for data under this key.
   Result<bool> verify(std::string_view data, std::string_view signature) const;
 

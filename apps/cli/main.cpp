@@ -346,13 +346,15 @@ int cmd_keygen(const std::vector<std::string>& args) {
     }
   }
   if (out.empty()) {
-    std::cerr << "usage: mcdf keygen --out <key.pem> [--type ed25519|x25519]\n";
+    std::cerr << "usage: mcdf keygen --out <key.pem> "
+                 "[--type ed25519|ecdsa-p256|x25519]\n";
     return 2;
   }
 
   std::string pem, did;
-  if (type == "ed25519") {  // signing key
-    auto key = mcdf::PrivateKey::generate_ed25519();
+  if (type == "ed25519" || type == "ecdsa-p256") {  // signing keys
+    auto key = (type == "ed25519") ? mcdf::PrivateKey::generate_ed25519()
+                                   : mcdf::PrivateKey::generate_ecdsa_p256();
     if (!key) { std::cerr << "error: " << key.error().message << "\n"; return 1; }
     auto p = key->to_pem();
     auto d = key->did_key();
@@ -370,7 +372,8 @@ int cmd_keygen(const std::vector<std::string>& args) {
     pem = *p;
     did = *d;
   } else {
-    std::cerr << "error: unknown key type '" << type << "' (ed25519|x25519)\n";
+    std::cerr << "error: unknown key type '" << type
+              << "' (ed25519|ecdsa-p256|x25519)\n";
     return 2;
   }
 
