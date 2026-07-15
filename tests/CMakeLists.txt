@@ -3,7 +3,12 @@
 
 find_package(doctest CONFIG REQUIRED)
 
-add_executable(mcdf-tests test_smoke.cpp)
+add_executable(mcdf-tests
+  test_smoke.cpp
+  test_inspect.cpp
+)
 target_link_libraries(mcdf-tests PRIVATE mcdf::mcdf doctest::doctest)
+target_compile_definitions(mcdf-tests PRIVATE
+  MCDF_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 add_test(NAME mcdf-tests COMMAND mcdf-tests)

@@ -11,6 +11,11 @@ find_package(spdlog CONFIG REQUIRED)
 # (foundation/, serialize/, model/, container/, crypto/, core/, render/).
 add_library(mcdf
   version.cpp
+  error.cpp
+  container/directory_container.cpp
+  serialize/markdown.cpp
+  serialize/parsers.cpp
+  model/document.cpp
 )
 add_library(mcdf::mcdf ALIAS mcdf)
 

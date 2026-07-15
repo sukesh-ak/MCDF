@@ -1,0 +1,8 @@
+title: Master Service Agreement
+version: 1.2.0
+authors:
+  - name: Alice
+    id: did:key:z6MkExample
+created_at: 2025-01-01
+classification: confidential
+language: en
