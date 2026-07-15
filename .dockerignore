@@ -1,0 +1,23 @@
+# Keep the build context small and private material out of the image.
+.git
+.gitignore
+.gitattributes
+
+# Private research & plans (also gitignored) — never copy into an image.
+internal/
+
+# Build output & vcpkg artifacts
+build/
+**/build/
+vcpkg_installed/
+**/vcpkg_installed/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
+
+# Docs not needed to build
+docs/

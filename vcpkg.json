@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "mcdf",
+  "version": "0.1.0",
+  "description": "Markdown Container Document Format - primary C++ runtime and tooling",
+  "license": "Apache-2.0",
+  "dependencies": [
+    "openssl",
+    "nlohmann-json",
+    "yaml-cpp",
+    "md4c",
+    "spdlog",
+    "cxxopts"
+  ],
+  "features": {
+    "tests": {
+      "description": "Build unit tests",
+      "dependencies": [
+        "doctest"
+      ]
+    }
+  }
+}

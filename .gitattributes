@@ -1,0 +1,19 @@
+# MCDF hashing is byte-sensitive: normalize line endings to LF everywhere so
+# containers and manifests hash identically across platforms.
+* text=auto eol=lf
+
+# Explicit text types
+*.md    text eol=lf
+*.hpp   text eol=lf
+*.cpp   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.txt   text eol=lf
+*.svg   text eol=lf
+
+# Binary assets (never normalize)
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.mcdf  binary
