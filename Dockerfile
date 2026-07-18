@@ -25,7 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV VCPKG_ROOT=/opt/vcpkg
 ENV PATH="${VCPKG_ROOT}:${PATH}"
-RUN git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}" \
+# Full clone (not --depth 1) so vcpkg can resolve the manifest's
+# builtin-baseline commit - reproducible dependency versions across Docker/CI/local.
+RUN git clone https://github.com/microsoft/vcpkg "${VCPKG_ROOT}" \
     && "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
 WORKDIR /src
 

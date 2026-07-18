@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The MCDF Project
 //
-// MCDF Studio - E1 shell.
+// MCDF Studio - E1 shell (document-centric).
 //
-// A Dear ImGui desktop window that links libmcdf directly (no CLI/FFI seam).
-// Opens an MCDF container (a directory or a .mcdf archive) via the first-party
-// imfd file dialog and provides:
+// A Dear ImGui desktop editor that links libmcdf directly (no CLI/FFI seam) and
+// treats a single .mcdf file as "the document" - like .docx. Opening a .mcdf
+// unpacks it to a hidden temp working copy; Save re-packs that working copy back
+// into the same .mcdf file. It provides:
 //   - a syntax-highlighted Markdown source editor (ImGuiColorTextEdit) for
-//     content.md, editable when the container is a directory;
+//     content.md;
 //   - a live rendered preview (imgui_md over md4c - the same parser libmcdf's
 //     renderer uses);
-//   - dirty tracking and Save (writes content.md back via DirectoryContainer).
+//   - Save that keeps the manifest in sync and re-packs the .mcdf.
 //
-// Later milestones add the manifest / trust / audit / conformance panels and
-// the "edit invalidates signature" demo (see internal plan 04).
-//
-// NOTE: this file has not yet been compiled in-tree (the authoring environment
-// has no C++ toolchain/vcpkg). Build it with `cmake --preset studio`.
+// "Open unpacked folder..." remains as a secondary path for the directory
+// authoring form (git-friendly). Later milestones add the manifest / trust /
+// audit / conformance panels and the signature-invalidate demo (plan 04).
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "imgui.h"
@@ -36,6 +38,8 @@
 #include "TextEditor.h"
 #include "imgui_md.h"
 
+namespace fs = std::filesystem;
+
 namespace {
 
 // imgui_md subclass. The base renders text/lists/links/tables with the default
@@ -45,45 +49,85 @@ struct MarkdownView : imgui_md {
   bool get_image(image_info&) const override { return false; }
 };
 
-// The currently open container, flattened into view-friendly fields. E-later
-// grows this into a proper Workspace/Document model (plan 04, section 6). The
-// editable content.md text lives in the TextEditor, not here.
+// The open document, flattened into view-friendly fields. The editable
+// content.md text lives in the TextEditor; the container files live in g_workdir.
 struct OpenDoc {
-  std::string path;
+  std::string path;          // the .mcdf file, or the folder, shown to the user
   std::string status;
   std::vector<std::string> files;
-  bool has_content = false;   // container has a content.md member
-  bool editable = false;      // opened as a directory -> writable
-  std::string title;          // metadata.title, if any
-  std::string doc_type;       // schema.document_type, if any
+  bool has_content = false;
+  bool is_archive = false;   // opened from a .mcdf file (vs an unpacked folder)
+  std::string title;         // metadata.title, if any
+  std::string doc_type;      // schema.document_type, if any
   int heading_count = 0;
 };
 
 std::optional<OpenDoc> g_doc;
 imfd::FileDialog g_dialog;
-std::unique_ptr<TextEditor> g_editor;  // created after the ImGui context exists
-std::size_t g_saved_undo = 0;          // editor undo index at last load/save
+std::unique_ptr<TextEditor> g_editor;   // created after the ImGui context exists
+std::size_t g_saved_undo = 0;           // editor undo index at last load/save
 bool g_quit = false;
 
-bool is_dirty() {
-  return g_editor && g_doc && g_doc->editable &&
-         g_editor->GetUndoIndex() != g_saved_undo;
+fs::path g_workdir;              // working copy: unpacked temp (archive) or the folder
+bool g_workdir_is_temp = false;  // remove on close if it is our temp dir
+std::string g_archive_path;      // .mcdf file to save back to (empty in folder mode)
+
+enum class OpenMode { None, Archive, Folder };
+OpenMode g_pending = OpenMode::None;
+
+// ---- small filesystem helpers -------------------------------------------------
+
+std::string read_file_bytes(const std::string& path, bool& ok) {
+  std::ifstream in(path, std::ios::binary);
+  ok = static_cast<bool>(in);
+  if (!ok) return {};
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
 }
 
-// Open a container by path and populate g_doc + the editor. All MCDF work is an
-// in-process libmcdf call - the whole point of the C++ client.
-void open_path(const std::string& path) {
-  OpenDoc d;
-  d.path = path;
-  d.editable = std::filesystem::is_directory(path);
+bool write_file_bytes(const std::string& path, std::string_view bytes) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(out);
+}
 
-  auto container = mcdf::open_container(path);
+fs::path make_workdir() {
+  static int counter = 0;
+  std::error_code ec;
+  const fs::path dir =
+      fs::temp_directory_path(ec) / "mcdf-studio" / ("work-" + std::to_string(++counter));
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir, ec);
+  return dir;
+}
+
+void cleanup_workdir() {
+  if (g_workdir_is_temp && !g_workdir.empty()) {
+    std::error_code ec;
+    fs::remove_all(g_workdir, ec);
+  }
+  g_workdir.clear();
+  g_workdir_is_temp = false;
+  g_archive_path.clear();
+}
+
+bool is_dirty() {
+  return g_editor && g_doc && g_editor->GetUndoIndex() != g_saved_undo;
+}
+
+// ---- open / save --------------------------------------------------------------
+
+// Load the container that currently lives in g_workdir into the UI + editor.
+void load_from_workdir(const std::string& display_path, bool is_archive) {
+  OpenDoc d;
+  d.path = display_path;
+  d.is_archive = is_archive;
+
+  auto container = mcdf::open_container(g_workdir);
   if (!container) {
     d.status = "open failed: " + container.error().message;
-    if (g_editor) {
-      g_editor->SetText("");
-      g_editor->SetReadOnlyEnabled(true);
-    }
+    if (g_editor) g_editor->SetText("");
     g_doc = std::move(d);
     return;
   }
@@ -109,52 +153,129 @@ void open_path(const std::string& path) {
 
   if (g_editor) {
     g_editor->SetText(content);
-    g_editor->SetReadOnlyEnabled(!d.editable);
+    g_editor->SetReadOnlyEnabled(false);
     g_saved_undo = g_editor->GetUndoIndex();
   }
 
-  if (d.status.empty())
-    d.status = d.editable ? ("opened " + path) : ("opened (read-only) " + path);
+  if (d.status.empty()) d.status = "opened " + display_path;
   g_doc = std::move(d);
 }
 
-// Write content.md back to a directory container.
-void save_content() {
-  if (!g_editor || !g_doc || !g_doc->editable) return;
-  auto dir = mcdf::DirectoryContainer::open(g_doc->path);
+// Open a .mcdf document: unpack it to a hidden temp working copy, then load.
+void open_archive(const std::string& mcdf_path) {
+  cleanup_workdir();
+
+  bool ok = false;
+  const std::string bytes = read_file_bytes(mcdf_path, ok);
+  if (!ok) {
+    OpenDoc d;
+    d.path = mcdf_path;
+    d.status = "cannot read " + mcdf_path;
+    g_doc = std::move(d);
+    return;
+  }
+
+  const fs::path work = make_workdir();
+  if (auto un = mcdf::unpack_archive(bytes, work); !un) {
+    std::error_code ec;
+    fs::remove_all(work, ec);
+    OpenDoc d;
+    d.path = mcdf_path;
+    d.status = "unpack failed: " + un.error().message;
+    g_doc = std::move(d);
+    return;
+  }
+
+  g_workdir = work;
+  g_workdir_is_temp = true;
+  g_archive_path = mcdf_path;
+  load_from_workdir(mcdf_path, /*is_archive=*/true);
+}
+
+// Open an already-unpacked directory container (authoring form) in place.
+void open_folder(const std::string& dir_path) {
+  cleanup_workdir();
+  g_workdir = fs::path(dir_path);
+  g_workdir_is_temp = false;
+  g_archive_path.clear();
+  load_from_workdir(dir_path, /*is_archive=*/false);
+}
+
+void save_document() {
+  if (!g_editor || !g_doc || g_workdir.empty()) return;
+
+  auto dir = mcdf::DirectoryContainer::open(g_workdir);
   if (!dir) {
     g_doc->status = "save failed: " + dir.error().message;
     return;
   }
+
   const std::string text = g_editor->GetText();
-  if (auto w = (*dir)->write("content.md", text)) {
-    g_saved_undo = g_editor->GetUndoIndex();
-    g_doc->status = "saved content.md (" + std::to_string(text.size()) + " bytes)";
-  } else {
+  if (auto w = (*dir)->write("content.md", text); !w) {
     g_doc->status = "save failed: " + w.error().message;
+    return;
   }
+
+  // Keep integrity consistent: if the document carries a manifest, rebuild it so
+  // content.md and manifest.json stay in sync. This invalidates any existing
+  // signatures by design (tamper evidence); re-signing is a later milestone.
+  if ((*dir)->contains("manifest.json")) {
+    if (auto container = mcdf::open_container(g_workdir)) {
+      if (auto m = mcdf::build_manifest(**container)) {
+        if (auto json = mcdf::manifest_to_canonical_json(*m))
+          (void)(*dir)->write("manifest.json", *json);
+      }
+    }
+  }
+
+  // For a .mcdf document, re-pack the working copy back into the single file.
+  if (g_doc->is_archive && !g_archive_path.empty()) {
+    auto container = mcdf::open_container(g_workdir);
+    if (!container) {
+      g_doc->status = "save failed: " + container.error().message;
+      return;
+    }
+    auto archive = mcdf::pack_container(**container);
+    if (!archive) {
+      g_doc->status = "save failed: " + archive.error().message;
+      return;
+    }
+    if (!write_file_bytes(g_archive_path, *archive)) {
+      g_doc->status = "save failed: cannot write " + g_archive_path;
+      return;
+    }
+    g_doc->status =
+        "saved " + g_archive_path + " (" + std::to_string(archive->size()) + " bytes)";
+  } else {
+    g_doc->status = "saved content.md";
+  }
+
+  g_saved_undo = g_editor->GetUndoIndex();
 }
+
+// ---- UI -----------------------------------------------------------------------
 
 void draw_menu_bar() {
   if (ImGui::BeginMainMenuBar()) {
     if (ImGui::BeginMenu("File")) {
-      if (ImGui::MenuItem("Open container folder...")) {
+      if (ImGui::MenuItem("Open .mcdf document...")) {
+        imfd::Config cfg;
+        cfg.title = "Open MCDF document";
+        cfg.mode = imfd::Mode::OpenFile;
+        cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
+        g_pending = OpenMode::Archive;
+        g_dialog.Open(cfg);
+      }
+      if (ImGui::MenuItem("Open unpacked folder...")) {
         imfd::Config cfg;
         cfg.title = "Open MCDF container folder";
         cfg.mode = imfd::Mode::PickFolder;
-        g_dialog.Open(cfg);
-      }
-      if (ImGui::MenuItem("Open .mcdf archive...")) {
-        imfd::Config cfg;
-        cfg.title = "Open MCDF archive";
-        cfg.mode = imfd::Mode::OpenFile;
-        cfg.filters = {{"MCDF container", {".mcdf"}}, {"All files", {"*"}}};
+        g_pending = OpenMode::Folder;
         g_dialog.Open(cfg);
       }
       ImGui::Separator();
-      const bool can_save = g_doc && g_doc->editable && g_doc->has_content;
-      if (ImGui::MenuItem("Save content.md", nullptr, false, can_save))
-        save_content();
+      const bool can_save = g_doc && g_doc->has_content;
+      if (ImGui::MenuItem("Save", nullptr, false, can_save)) save_document();
       ImGui::Separator();
       if (ImGui::MenuItem("Quit")) g_quit = true;
       ImGui::EndMenu();
@@ -163,17 +284,17 @@ void draw_menu_bar() {
   }
 }
 
-void draw_container_panel() {
-  if (ImGui::Begin("Container")) {
+void draw_document_panel() {
+  if (ImGui::Begin("Document")) {
     if (!g_doc) {
-      ImGui::TextUnformatted("No container open.");
-      ImGui::TextUnformatted("File > Open container folder... or Open .mcdf");
+      ImGui::TextUnformatted("No document open.");
+      ImGui::TextUnformatted("File > Open .mcdf document...");
     } else {
-      ImGui::TextWrapped("Path: %s%s", g_doc->path.c_str(),
+      ImGui::TextWrapped("File: %s%s", g_doc->path.c_str(),
                          is_dirty() ? "  *(unsaved)" : "");
+      ImGui::TextUnformatted(g_doc->is_archive ? "(.mcdf document)"
+                                               : "(unpacked folder)");
       ImGui::TextWrapped("%s", g_doc->status.c_str());
-      if (!g_doc->editable)
-        ImGui::TextUnformatted("read-only (archive; unpack to edit)");
       ImGui::Separator();
       if (!g_doc->title.empty()) ImGui::Text("Title: %s", g_doc->title.c_str());
       if (!g_doc->doc_type.empty())
@@ -192,7 +313,7 @@ void draw_editor_panel() {
     if (g_doc && g_doc->has_content && g_editor) {
       g_editor->Render("##editor", ImGui::GetContentRegionAvail(), false);
     } else {
-      ImGui::TextUnformatted("(open a container with a content.md)");
+      ImGui::TextUnformatted("(open a document with a content.md)");
     }
   }
   ImGui::End();
@@ -269,9 +390,13 @@ int main() {
 
     ImGui::DockSpaceOverViewport();
     draw_menu_bar();
-    if (g_dialog.Draw() == imfd::Result::Picked)
-      open_path(g_dialog.SelectedPath());
-    draw_container_panel();
+    if (g_dialog.Draw() == imfd::Result::Picked) {
+      const std::string picked = g_dialog.SelectedPath();
+      if (g_pending == OpenMode::Archive) open_archive(picked);
+      else if (g_pending == OpenMode::Folder) open_folder(picked);
+      g_pending = OpenMode::None;
+    }
+    draw_document_panel();
     draw_editor_panel();
     draw_preview_panel();
 
@@ -285,6 +410,7 @@ int main() {
     glfwSwapBuffers(window);
   }
 
+  cleanup_workdir();
   g_editor.reset();
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();

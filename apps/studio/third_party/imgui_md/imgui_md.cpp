@@ -790,9 +790,15 @@ bool imgui_md::get_image(image_info& nfo) const
 	//Use m_href to identify images
 	
 	//Example - Imgui font texture
-	// MCDF vendor patch: Dear ImGui 1.92 made Fonts->TexID an ImTextureRef;
-	// image_info::texture_id is ImTextureID, so extract it explicitly.
+	// MCDF vendor patch: Dear ImGui 1.92 (IMGUI_VERSION_NUM >= 19200) made
+	// Fonts->TexID an ImTextureRef; image_info::texture_id is ImTextureID, so
+	// extract it explicitly. Older ImGui assigns directly. Guarded so the build
+	// works whichever imgui version vcpkg resolves on each platform.
+#if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 19200
 	nfo.texture_id = ImGui::GetIO().Fonts->TexID.GetTexID();
+#else
+	nfo.texture_id = ImGui::GetIO().Fonts->TexID;
+#endif
 	nfo.size = { 100,50 };
 	nfo.uv0 = { 0,0 };
 	nfo.uv1 = { 1,1 };
