@@ -38,9 +38,12 @@
 
 namespace {
 
-// Trivial imgui_md subclass - the base class renders text/lists/links/tables
-// with the default font; E-later can override get_font() for larger headings.
-struct MarkdownView : imgui_md {};
+// imgui_md subclass. The base renders text/lists/links/tables with the default
+// font; E-later can override get_font() for larger headings. We skip inline
+// images in the E1 preview (get_image -> false).
+struct MarkdownView : imgui_md {
+  bool get_image(image_info&) const override { return false; }
+};
 
 // The currently open container, flattened into view-friendly fields. E-later
 // grows this into a proper Workspace/Document model (plan 04, section 6). The

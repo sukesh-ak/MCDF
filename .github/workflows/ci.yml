@@ -53,6 +53,61 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # Build the MCDF Studio GUI editor and publish the binary as an artifact.
+  # GUI apps can't be launched headlessly in CI, so this verifies the build
+  # compiles and links, then uploads the executable for manual testing.
+  studio:
+    name: studio-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows }
+          - { os: ubuntu-latest,  name: linux }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-studio-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-studio-${{ runner.os }}-
+
+      # GLFW needs X11 / Wayland / OpenGL dev libraries on Linux; Windows uses
+      # Win32/OpenGL that ship with the runner.
+      - name: Install GUI system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorg-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            extra-cmake-modules libgl1-mesa-dev libglu1-mesa-dev
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMCDF_BUILD_STUDIO=ON \
+            -DMCDF_BUILD_TESTS=OFF \
+            -DVCPKG_MANIFEST_FEATURES=studio \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build Studio
+        run: cmake --build build --config Release --parallel --target mcdf-studio
+
+      - name: Upload Studio binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdf-studio-${{ matrix.name }}
+          path: |
+            build/apps/studio/Release/mcdf-studio.exe
+            build/apps/studio/mcdf-studio
+          if-no-files-found: error
+
   # The reproducible Linux build, exactly as a contributor would run it.
   docker:
     name: docker

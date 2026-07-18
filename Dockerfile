@@ -10,6 +10,10 @@
 # Usage:
 #   docker build -t mcdf .            # builds deps, compiles, runs tests
 #   docker run --rm mcdf --version    # run the CLI
+#
+#   # Build the MCDF Studio GUI editor (Linux binary) and extract it to ./build:
+#   scripts/build-studio-docker.sh
+#   # (or manually: docker build --target studio -t mcdf-studio-build . )
 
 # ---- base: toolchain + vcpkg ----
 FROM ubuntu:24.04 AS base
@@ -37,6 +41,21 @@ COPY . .
 RUN cmake --preset default \
     && cmake --build --preset default \
     && ctest --preset default
+
+# ---- studio: build the MCDF Studio GUI editor (Dear ImGui) ----
+# A GUI client, built on demand (`--target studio`) - not part of the default
+# runtime image. vcpkg's glfw3 needs X11 / Wayland / OpenGL development
+# libraries present before it is compiled.
+FROM deps AS studio
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xorg-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+      extra-cmake-modules libgl1-mesa-dev libglu1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Add the Studio feature deps (imgui + glfw3) on top of the cached base deps.
+RUN vcpkg install --x-feature=tests --x-feature=studio --clean-after-build
+COPY . .
+RUN cmake --preset studio && cmake --build --preset studio
+# Result: /src/build/studio/apps/studio/mcdf-studio  (Linux/ELF GUI binary)
 
 # ---- runtime: slim image with the CLI only ----
 # The default x64-linux vcpkg triplet links statically, so the binary needs no
