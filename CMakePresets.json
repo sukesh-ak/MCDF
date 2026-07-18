@@ -13,10 +13,20 @@
         "MCDF_BUILD_TESTS": "ON",
         "VCPKG_MANIFEST_FEATURES": "tests"
       }
+    },
+    {
+      "name": "studio",
+      "displayName": "Studio (GUI editor + tests)",
+      "inherits": "default",
+      "cacheVariables": {
+        "MCDF_BUILD_STUDIO": "ON",
+        "VCPKG_MANIFEST_FEATURES": "tests;studio"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "default", "configurePreset": "default" }
+    { "name": "default", "configurePreset": "default" },
+    { "name": "studio", "configurePreset": "studio" }
   ],
   "testPresets": [
     {
