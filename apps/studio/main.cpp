@@ -223,9 +223,19 @@ int main() {
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
+  // GL context hints. macOS only grants OpenGL 3.2+ Core, forward-compatible;
+  // Linux/Windows are happy with a 3.0 compatibility context.
+#if defined(__APPLE__)
+  const char* glsl_version = "#version 150";
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#else
   const char* glsl_version = "#version 130";
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+#endif
 
   GLFWwindow* window =
       glfwCreateWindow(1280, 800, "MCDF Studio", nullptr, nullptr);
