@@ -18,6 +18,20 @@
       "dependencies": [
         "doctest"
       ]
+    },
+    "studio": {
+      "description": "MCDF Studio - Dear ImGui desktop editor (apps/studio)",
+      "dependencies": [
+        {
+          "name": "imgui",
+          "features": [
+            "docking-experimental",
+            "glfw-binding",
+            "opengl3-binding"
+          ]
+        },
+        "glfw3"
+      ]
     }
   }
 }
