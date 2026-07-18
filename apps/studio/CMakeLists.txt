@@ -15,12 +15,18 @@ find_package(OpenGL REQUIRED)
 # First-party file dialog target (mcdf::imfd).
 add_subdirectory(include/imfiledialog)
 
+# Third-party vendored widgets (MIT): source editor + Markdown preview.
+add_subdirectory(third_party/ImGuiColorTextEdit)
+add_subdirectory(third_party/imgui_md)
+
 add_executable(mcdf-studio main.cpp)
 set_target_properties(mcdf-studio PROPERTIES OUTPUT_NAME mcdf-studio)
 target_compile_features(mcdf-studio PRIVATE cxx_std_23)
 target_link_libraries(mcdf-studio PRIVATE
   mcdf::mcdf
   mcdf::imfd
+  mcdf::texteditor
+  mcdf::imgui_md
   imgui::imgui
   glfw
   OpenGL::GL
