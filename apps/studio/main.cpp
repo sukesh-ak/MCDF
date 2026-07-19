@@ -221,6 +221,26 @@ void rebuild_fonts() {
   g_mono = nullptr;
   if (!mono.empty() && fs::exists(mono, ec))
     g_mono = io.Fonts->AddFontFromFileTTF(mono.c_str(), kRef);
+  // Merge a broad-coverage monospace fallback (DejaVu Sans Mono) so glyphs the
+  // chosen editor face lacks - arrows, math, box drawing, dingbats - render
+  // instead of tofu boxes. Merge only fills glyphs the base font is missing.
+  const std::string mono_fallback = fonts + "/DejaVuSansMono.ttf";
+  if (g_mono && fs::exists(mono_fallback, ec)) {
+    ImFontConfig cfg;
+    cfg.MergeMode = true;
+    cfg.PixelSnapH = true;
+    static const ImWchar sym_ranges[] = {
+        0x2000, 0x206F,  // General Punctuation (dashes, bullets, ellipsis)
+        0x2190, 0x21FF,  // Arrows
+        0x2200, 0x22FF,  // Mathematical Operators
+        0x2500, 0x257F,  // Box Drawing
+        0x25A0, 0x25FF,  // Geometric Shapes
+        0x2600, 0x26FF,  // Miscellaneous Symbols
+        0x2700, 0x27BF,  // Dingbats
+        0,
+    };
+    io.Fonts->AddFontFromFileTTF(mono_fallback.c_str(), kRef, &cfg, sym_ranges);
+  }
   if (!g_mono) g_mono = g_ui;
 }
 
