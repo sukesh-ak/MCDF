@@ -32,6 +32,9 @@ target_link_libraries(mcdf-studio PRIVATE
   glfw
   OpenGL::GL
 )
+if(WIN32)
+  target_link_libraries(mcdf-studio PRIVATE dwmapi)  # dark native title bar
+endif()
 
 # Fonts/assets live next to the executable (deployed post-build); the compile-
 # time fallback points at the source tree so dev runs from the build dir work.

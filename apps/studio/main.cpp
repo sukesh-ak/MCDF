@@ -39,6 +39,12 @@
 #define NOMINMAX  // keep windows.h from defining min/max macros (breaks std::min/max)
 #endif
 #include <windows.h>  // GetModuleFileNameA for assets_dir()
+#include <dwmapi.h>   // dark native title bar
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>  // glfwGetWin32Window
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
@@ -87,6 +93,7 @@ imfd::FileDialog g_dialog;
 std::unique_ptr<TextEditor> g_editor;
 std::size_t g_saved_undo = 0;
 bool g_quit = false;
+GLFWwindow* g_window = nullptr;
 
 ImFont* g_ui = nullptr;
 ImFont* g_mono = nullptr;
@@ -102,6 +109,11 @@ Prefs g_prefs;
 std::vector<std::pair<std::string, std::string>> g_fonts;  // {display name, path}
 bool g_font_rebuild = false;
 bool g_show_settings = false;
+
+// Panel visibility (toggled from the View menu; the panels' own [x] closes them).
+bool g_show_editor = true;
+bool g_show_preview = true;
+bool g_show_document = true;
 
 fs::path g_workdir;
 bool g_workdir_is_temp = false;
@@ -244,6 +256,19 @@ void rebuild_fonts() {
   if (!g_mono) g_mono = g_ui;
 }
 
+// Match the native window title bar to the theme (Windows draws it light by
+// default, which clashes with the dark client area). No-op off Windows.
+void set_native_dark_titlebar(bool dark) {
+#if defined(_WIN32)
+  if (!g_window) return;
+  const HWND hwnd = glfwGetWin32Window(g_window);
+  const BOOL v = dark ? TRUE : FALSE;
+  DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &v, sizeof(v));
+#else
+  (void)dark;
+#endif
+}
+
 void apply_theme_dark() {
   ImGui::StyleColorsDark();
   ImVec4* c = ImGui::GetStyle().Colors;
@@ -314,6 +339,7 @@ void apply_theme(int t) {
   s.TabRounding = 2.0f;
   s.ScrollbarRounding = 3.0f;
   s.GrabRounding = 2.0f;
+  set_native_dark_titlebar(t != 1);  // light title bar only for the Light theme
 }
 
 // ---- small filesystem helpers --------------------------------------------------
@@ -522,6 +548,12 @@ void draw_menu_bar() {
       g_quit = true;
     ImGui::EndMenu();
   }
+  if (ImGui::BeginMenu("View")) {
+    ImGui::MenuItem(ICON_FA_PEN "  Editor", nullptr, &g_show_editor);
+    ImGui::MenuItem(ICON_FA_FILE_LINES "  Preview", nullptr, &g_show_preview);
+    ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Document", nullptr, &g_show_document);
+    ImGui::EndMenu();
+  }
   ImGui::EndMenuBar();
 }
 
@@ -664,7 +696,8 @@ void draw_settings() {
 }
 
 void draw_document_panel() {
-  if (ImGui::Begin("Document")) {
+  if (!g_show_document) return;
+  if (ImGui::Begin(ICON_FA_CIRCLE_INFO "  Document", &g_show_document)) {
     if (!g_doc) {
       ImGui::TextUnformatted("No document open.");
       ImGui::Spacing();
@@ -689,7 +722,8 @@ void draw_document_panel() {
 }
 
 void draw_editor_panel() {
-  if (ImGui::Begin(ICON_FA_PEN "  content.md")) {
+  if (!g_show_editor) return;
+  if (ImGui::Begin(ICON_FA_PEN "  Editor", &g_show_editor)) {
     if (g_doc && g_doc->has_content && g_editor) {
       if (g_mono)
 #if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 19200
@@ -707,7 +741,8 @@ void draw_editor_panel() {
 }
 
 void draw_preview_panel() {
-  if (ImGui::Begin(ICON_FA_FILE_LINES "  Preview")) {
+  if (!g_show_preview) return;
+  if (ImGui::Begin(ICON_FA_FILE_LINES "  Preview", &g_show_preview)) {
     if (g_doc && g_doc->has_content && g_editor) {
       const std::string text = g_editor->GetText();
       static MarkdownView md;
@@ -759,6 +794,7 @@ int main() {
     return 1;
   }
   glfwMakeContextCurrent(window);
+  g_window = window;
   glfwSwapInterval(1);  // vsync
 
   IMGUI_CHECKVERSION();
