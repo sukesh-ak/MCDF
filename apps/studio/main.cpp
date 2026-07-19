@@ -120,7 +120,6 @@ Prefs g_prefs;
 std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
-bool g_show_document = false;  // container-inspector panel
 
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
@@ -859,10 +858,6 @@ void draw_menu_bar() {
       open_insert_image_dialog();
     ImGui::EndMenu();
   }
-  if (ImGui::BeginMenu("View")) {
-    ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Document info", nullptr, &g_show_document);
-    ImGui::EndMenu();
-  }
   ImGui::EndMenuBar();
 }
 
@@ -951,26 +946,24 @@ void draw_document_window(Document& d) {
   ImGui::End();
 }
 
-void draw_inspector_panel() {
-  if (!g_show_document) return;
-  if (ImGui::Begin(ICON_FA_CIRCLE_INFO "  Document info", &g_show_document)) {
-    if (!g_active) {
-      ImGui::TextUnformatted("No document focused.");
-    } else {
-      Document& d = *g_active;
-      ImGui::TextWrapped("File: %s", d.path.c_str());
-      ImGui::TextDisabled(d.is_archive ? "(.mcdf document)" : "(unpacked folder)");
-      ImGui::TextWrapped("%s", d.status.c_str());
-      ImGui::Separator();
-      if (!d.title.empty()) ImGui::Text("Title: %s", d.title.c_str());
-      if (!d.doc_type.empty()) ImGui::Text("Type:  %s", d.doc_type.c_str());
-      ImGui::Text("Headings: %d", d.heading_count);
-      ImGui::Text("Members:  %d", static_cast<int>(d.files.size()));
-      ImGui::Separator();
-      for (const auto& f : d.files) ImGui::BulletText("%s", f.c_str());
-    }
+// Formatted document summary shown as a tooltip on the footer's file label.
+void document_info_tooltip(const Document& d) {
+  ImGui::BeginTooltip();
+  if (!d.title.empty()) ImGui::Text("Title:     %s", d.title.c_str());
+  ImGui::Text("Type:      %s   (from schema.yaml)",
+              d.doc_type.empty() ? "(none)" : d.doc_type.c_str());
+  ImGui::Text("Kind:      %s", d.is_archive ? ".mcdf document" : "unpacked folder");
+  ImGui::Text("Headings:  %d", d.heading_count);
+  ImGui::Text("Members:   %d", static_cast<int>(d.files.size()));
+  if (!d.files.empty()) {
+    ImGui::Separator();
+    for (const auto& f : d.files) ImGui::BulletText("%s", f.c_str());
   }
-  ImGui::End();
+  if (!d.status.empty()) {
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", d.status.c_str());
+  }
+  ImGui::EndTooltip();
 }
 
 void draw_status_bar() {
@@ -994,6 +987,7 @@ void draw_status_bar() {
                           static_cast<int>(g_documents.size()));
     } else {
       Document& d = *g_active;
+      ImGui::BeginGroup();
       ImGui::TextColored(kAccent, ICON_FA_FILE_LINES);
       ImGui::SameLine();
       ImGui::Text("%s", d.path.c_str());
@@ -1001,6 +995,8 @@ void draw_status_bar() {
         ImGui::SameLine();
         ImGui::TextColored(kDirty, ICON_FA_PEN " unsaved");
       }
+      ImGui::EndGroup();
+      if (ImGui::IsItemHovered()) document_info_tooltip(d);  // formatted summary
       const std::string right =
           (d.doc_type.empty() ? std::string("document") : d.doc_type) +
           (d.is_archive ? "  |  .mcdf" : "  |  folder");
@@ -1130,7 +1126,6 @@ int main() {
     if (dlg_res != imfd::Result::None) save_preferences(g_window);
 
     for (auto& d : g_documents) draw_document_window(*d);
-    draw_inspector_panel();
     draw_status_bar();
     draw_settings();
 
