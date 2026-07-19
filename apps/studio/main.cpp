@@ -991,17 +991,21 @@ void draw_host() {
     dock_flags |= ImGuiDockNodeFlags_PassthruCentralNode;
   }
 
+  const float pad_x = ImGui::GetStyle().FramePadding.x;
   const float def_pad_y = ImGui::GetStyle().FramePadding.y;
-  const float status_h = ImGui::GetFontSize() + def_pad_y * 2.0f +
-                         ImGui::GetStyle().WindowPadding.y * 2.0f;
+  const float wp_y = ImGui::GetStyle().WindowPadding.y;
+  const ImVec2 tall_pad(pad_x, def_pad_y + 4.0f);
+  const float status_h = ImGui::GetFontSize() + def_pad_y * 2.0f + wp_y * 2.0f;
 
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                      ImVec2(ImGui::GetStyle().FramePadding.x, def_pad_y + 4.0f));
+  // Roomier menu bar - its height is fixed at Begin() from FramePadding. Pop the
+  // inflated padding before DockSpace so the docked tabs get the normal, compact
+  // height, then restore it only for the menu items.
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tall_pad);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::Begin("##StudioHost", nullptr, flags);
-  ImGui::PopStyleVar(3);
+  ImGui::PopStyleVar(4);  // incl. FramePadding -> dock tabs use the normal height
 
   const ImGuiID dock_id = ImGui::GetID("StudioDock");
   ImGui::DockSpace(dock_id, ImVec2(0.0f, -status_h), dock_flags);
@@ -1011,8 +1015,9 @@ void draw_host() {
     ImGui::TextDisabled(ICON_FA_FOLDER_OPEN "  Open a .mcdf document (File menu, Ctrl+O)");
   }
 
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tall_pad);  // pad menu items to the bar
   draw_menu_bar();
-  ImGui::PopStyleVar();  // taller FramePadding
+  ImGui::PopStyleVar();
   ImGui::End();
 }
 
