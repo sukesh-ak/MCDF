@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -118,6 +119,7 @@ bool g_show_document = true;
 fs::path g_workdir;
 bool g_workdir_is_temp = false;
 std::string g_archive_path;
+std::string g_last_dir;  // persisted last-visited dir for the file dialog
 
 enum class OpenMode { None, Archive, Folder };
 OpenMode g_pending = OpenMode::None;
@@ -157,6 +159,100 @@ std::string assets_dir() {
 #else
   return "assets";
 #endif
+}
+
+// ---- persisted UI state (config dir) ------------------------------------------
+
+// Per-user config dir: %APPDATA%\MCDF Studio on Windows, $XDG_CONFIG_HOME or
+// ~/.config/mcdf-studio elsewhere. Holds the imgui layout, window geometry, and
+// file-dialog bookmarks so they survive across runs.
+fs::path config_dir() {
+#if defined(_WIN32)
+  const char* base = std::getenv("APPDATA");
+  fs::path dir = (base && *base) ? fs::path(base) : fs::path(".");
+  dir /= "MCDF Studio";
+#else
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  const char* home = std::getenv("HOME");
+  fs::path dir = (xdg && *xdg)    ? fs::path(xdg)
+                 : (home && *home) ? fs::path(home) / ".config"
+                                   : fs::path(".");
+  dir /= "mcdf-studio";
+#endif
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  return dir;
+}
+
+struct WinGeom {
+  int w = 1280, h = 800, x = -1, y = -1;
+};
+
+WinGeom g_win_geom;
+std::string g_saved_ui_font, g_saved_mono_font;  // resolved to indices after scan_fonts
+
+// Editor preferences: theme, fonts, window geometry, and file-dialog bookmarks.
+// This is a separate concern from ImGui's own window-layout ini (imgui.ini),
+// which ImGui manages itself - we only point it at a stable path.
+void load_preferences() {
+  std::ifstream f((config_dir() / "preferences.ini").string());
+  if (!f) return;
+  auto& bm = g_dialog.Bookmarks();
+  bm.clear();
+  std::string line;
+  while (std::getline(f, line)) {
+    const auto eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string k = line.substr(0, eq);
+    const std::string v = line.substr(eq + 1);
+    if (k == "theme") {
+      try { g_prefs.theme = std::clamp(std::stoi(v), 0, 2); } catch (...) {}
+    } else if (k == "font_size") {
+      try { g_prefs.font_size = std::stof(v); } catch (...) {}
+    } else if (k == "ui_font") {
+      g_saved_ui_font = v;
+    } else if (k == "mono_font") {
+      g_saved_mono_font = v;
+    } else if (k == "window") {
+      std::sscanf(v.c_str(), "%d %d %d %d", &g_win_geom.w, &g_win_geom.h,
+                  &g_win_geom.x, &g_win_geom.y);
+    } else if (k == "last_dir") {
+      g_last_dir = v;
+    } else if (k == "bookmark") {
+      if (!v.empty()) bm.push_back(v);
+    }
+  }
+  g_prefs.font_size = std::clamp(g_prefs.font_size, 10.0f, 32.0f);
+  if (g_win_geom.w < 400) g_win_geom.w = 1280;
+  if (g_win_geom.h < 300) g_win_geom.h = 800;
+}
+
+void save_preferences(GLFWwindow* w) {
+  std::ofstream f((config_dir() / "preferences.ini").string(), std::ios::trunc);
+  if (!f) return;
+  const int n = static_cast<int>(g_fonts.size());
+  f << "theme=" << g_prefs.theme << '\n';
+  f << "font_size=" << g_prefs.font_size << '\n';
+  f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
+  f << "mono_font=" << (g_prefs.mono_idx < n ? g_fonts[g_prefs.mono_idx].first : "") << '\n';
+  if (w) {
+    int ww = 0, wh = 0, wx = 0, wy = 0;
+    glfwGetWindowSize(w, &ww, &wh);
+    glfwGetWindowPos(w, &wx, &wy);
+    f << "window=" << ww << ' ' << wh << ' ' << wx << ' ' << wy << '\n';
+  }
+  f << "last_dir=" << g_dialog.LastDirectory() << '\n';
+  for (const auto& b : g_dialog.Bookmarks()) f << "bookmark=" << b << '\n';
+}
+
+// After scan_fonts(): map the saved font names back to combo indices.
+void resolve_saved_fonts() {
+  for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i) {
+    if (!g_saved_ui_font.empty() && g_fonts[i].first == g_saved_ui_font)
+      g_prefs.ui_idx = i;
+    if (!g_saved_mono_font.empty() && g_fonts[i].first == g_saved_mono_font)
+      g_prefs.mono_idx = i;
+  }
 }
 
 // ---- fonts + theme -------------------------------------------------------------
@@ -520,6 +616,7 @@ void open_archive_dialog() {
   cfg.title = "Open MCDF document";
   cfg.mode = imfd::Mode::OpenFile;
   cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
   g_pending = OpenMode::Archive;
   g_dialog.Open(cfg);
 }
@@ -533,6 +630,7 @@ void draw_menu_bar() {
       imfd::Config cfg;
       cfg.title = "Open MCDF container folder";
       cfg.mode = imfd::Mode::PickFolder;
+      if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
       g_pending = OpenMode::Folder;
       g_dialog.Open(cfg);
     }
@@ -773,6 +871,8 @@ int main() {
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
+  load_preferences();  // theme, fonts, window geometry, dialog bookmarks
+
   // GL context hints. macOS only grants OpenGL 3.2+ Core, forward-compatible;
   // Linux/Windows are happy with a 3.0 compatibility context.
 #if defined(__APPLE__)
@@ -787,25 +887,30 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
 
-  GLFWwindow* window =
-      glfwCreateWindow(1280, 800, "MCDF Studio", nullptr, nullptr);
+  GLFWwindow* window = glfwCreateWindow(g_win_geom.w, g_win_geom.h, "MCDF Studio",
+                                        nullptr, nullptr);
   if (!window) {
     glfwTerminate();
     return 1;
   }
   glfwMakeContextCurrent(window);
   g_window = window;
+  if (g_win_geom.x >= 0 && g_win_geom.y >= 0)
+    glfwSetWindowPos(window, g_win_geom.x, g_win_geom.y);
   glfwSwapInterval(1);  // vsync
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+  static std::string ini_path = (config_dir() / "imgui.ini").string();
+  io.IniFilename = ini_path.c_str();  // stable layout persistence (not CWD-relative)
   ImGui::StyleColorsDark();
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
 
   scan_fonts();
+  resolve_saved_fonts();  // map saved font names -> combo indices
   rebuild_fonts();
   apply_theme(g_prefs.theme);
 
@@ -825,12 +930,14 @@ int main() {
 
     handle_shortcuts();
     draw_host();
-    if (g_dialog.Draw() == imfd::Result::Picked) {
+    const imfd::Result dlg_res = g_dialog.Draw();
+    if (dlg_res == imfd::Result::Picked) {
       const std::string picked = g_dialog.SelectedPath();
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
       g_pending = OpenMode::None;
     }
+    if (dlg_res != imfd::Result::None) save_preferences(g_window);  // persist bookmarks/last dir
     draw_document_panel();
     draw_editor_panel();
     draw_preview_panel();
@@ -848,6 +955,7 @@ int main() {
     glfwSwapBuffers(window);
   }
 
+  save_preferences(window);
   cleanup_workdir();
   g_editor.reset();
   ImGui_ImplOpenGL3_Shutdown();
