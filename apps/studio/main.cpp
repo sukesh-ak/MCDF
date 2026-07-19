@@ -1023,7 +1023,10 @@ void draw_document_window(Document& d) {
   const std::string label =
       (is_dirty(d) ? name + " *" : name) + "###doc" + std::to_string(d.id);
   ImGui::SetNextWindowSize(ImVec2(920, 640), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin(label.c_str(), &d.open)) {
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));  // panes fill to edge
+  const bool win_open = ImGui::Begin(label.c_str(), &d.open);
+  ImGui::PopStyleVar();
+  if (win_open) {
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) g_active = &d;
 
     if (!d.has_content) {
@@ -1033,7 +1036,7 @@ void draw_document_window(Document& d) {
       const float splitter = 6.0f;
       float left_w = std::clamp(d.split, 0.15f, 0.85f) * (avail.x - splitter);
 
-      ImGui::BeginChild("##editor", ImVec2(left_w, avail.y), ImGuiChildFlags_Borders);
+      ImGui::BeginChild("##editor", ImVec2(left_w, avail.y), ImGuiChildFlags_None);
       if (g_mono)
 #if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 19200
         ImGui::PushFont(g_mono, 0.0f);
@@ -1046,14 +1049,21 @@ void draw_document_window(Document& d) {
 
       ImGui::SameLine(0.0f, 0.0f);
       ImGui::InvisibleButton("##split", ImVec2(splitter, avail.y));
-      if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+      const bool split_active = ImGui::IsItemHovered() || ImGui::IsItemActive();
+      if (split_active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
       if (ImGui::IsItemActive() && avail.x > 1.0f)
         d.split += ImGui::GetIO().MouseDelta.x / avail.x;
       d.split = std::clamp(d.split, 0.15f, 0.85f);
+      // A single thin divider line down the splitter (no double outline).
+      const ImVec2 smin = ImGui::GetItemRectMin(), smax = ImGui::GetItemRectMax();
+      const float scx = (smin.x + smax.x) * 0.5f;
+      ImGui::GetWindowDrawList()->AddLine(
+          ImVec2(scx, smin.y), ImVec2(scx, smax.y),
+          ImGui::GetColorU32(split_active ? ImGuiCol_SeparatorActive : ImGuiCol_Separator),
+          1.0f);
       ImGui::SameLine(0.0f, 0.0f);
 
-      ImGui::BeginChild("##preview", ImVec2(0.0f, avail.y), ImGuiChildFlags_Borders);
+      ImGui::BeginChild("##preview", ImVec2(0.0f, avail.y), ImGuiChildFlags_None);
       g_render_workdir = d.workdir;  // for image resolution in get_image
       const std::string text = d.editor->GetText();
       static MarkdownView md;
