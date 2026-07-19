@@ -61,6 +61,12 @@ const ImVec4 kDirty{1.00f, 0.70f, 0.20f, 1.0f};
 // imgui_md subclass; skip inline images in the E1 preview.
 struct MarkdownView : imgui_md {
   bool get_image(image_info&) const override { return false; }
+  // Visible link color (imgui_md's default uses ImGuiCol_ButtonHovered, which is
+  // near-invisible in the dark theme).
+  ImVec4 get_color() const override {
+    if (!m_href.empty()) return ImVec4(0.32f, 0.66f, 1.00f, 1.00f);
+    return ImGui::GetStyle().Colors[ImGuiCol_Text];
+  }
 };
 
 // The open document. The editable content.md text lives in the TextEditor; the

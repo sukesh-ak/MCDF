@@ -220,7 +220,16 @@ void imgui_md::set_href(bool e, const MD_ATTRIBUTE& src)
 void imgui_md::set_font(bool e)
 {
 	if (e) {
-		ImGui::PushFont(get_font());
+		// MCDF: scale heading text (H1..H6) larger than body per Markdown
+		// convention. imgui 1.92 lets PushFont set a pixel size (0 = inherit).
+		float px = 0.0f;
+		if (m_hlevel > 0) {
+			static const float kScale[] = {1.0f, 1.9f, 1.55f, 1.32f, 1.15f, 1.05f, 1.0f};
+			const int lvl = (m_hlevel <= 6) ? static_cast<int>(m_hlevel) : 6;
+			const ImGuiStyle& st = ImGui::GetStyle();
+			px = st.FontSizeBase * st.FontScaleMain * kScale[lvl];
+		}
+		ImGui::PushFont(get_font(), px);
 	} else {
 		ImGui::PopFont();
 	}
