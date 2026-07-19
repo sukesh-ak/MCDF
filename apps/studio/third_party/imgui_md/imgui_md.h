@@ -132,6 +132,7 @@ private:
 	int span(MD_SPANTYPE type, void* d, bool e);
 
 	void render_text(const char* str, const char* str_end);
+	void render_code(const char* str, const char* str_end);  // MCDF: code + comment highlight
 	
 	void set_font(bool e);
 	void set_color(bool e);
@@ -158,6 +159,8 @@ private:
 	std::vector<std::string> m_div_stack;
 
 	unsigned m_code_id = 0;  // MCDF: per-render unique id for code-block child windows
+	bool m_code_block = false;  // MCDF: inside a fenced code block (vs inline code)
+	std::string m_code_lang;    // MCDF: fence language, for comment highlighting
 
 	MD_PARSER m_md;
 };

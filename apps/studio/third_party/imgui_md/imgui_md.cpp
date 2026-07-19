@@ -150,12 +150,16 @@ void imgui_md::BLOCK_QUOTE(bool)
 {
 
 }
-void imgui_md::BLOCK_CODE(const MD_BLOCK_CODE_DETAIL*, bool e)
+void imgui_md::BLOCK_CODE(const MD_BLOCK_CODE_DETAIL* d, bool e)
 {
 	// MCDF: render fenced code blocks in the monospace face inside a framed,
 	// auto-height box (get_font() returns the mono font while m_is_code is set).
 	m_is_code = e;
+	m_code_block = e;
 	if (e) {
+		m_code_lang.clear();
+		if (d && d->lang.text && d->lang.size)
+			m_code_lang.assign(d->lang.text, d->lang.size);
 		ImGui::NewLine();
 		ImGui::PushID(static_cast<int>(m_code_id++));
 		ImGui::BeginChild("##mcdf_code", ImVec2(0.0f, 0.0f),
@@ -460,6 +464,50 @@ void imgui_md::render_text(const char* str, const char* str_end)
 	if (!is_lf)ImGui::SameLine(0.0f, trail_space ? sp_w : 0.0f);
 }
 
+// MCDF: locate the start of a line comment (# or //) for the given fence language,
+// or nullptr. A marker only counts at the line start or after whitespace, to avoid
+// false positives like "foo#bar". Case-insensitive on the language token.
+static const char* find_line_comment(const char* s, const char* e, const std::string& lang)
+{
+	std::string l;
+	l.reserve(lang.size());
+	for (char c : lang) l += (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+
+	static const char* const HASH[] = {
+		"sh","bash","shell","zsh","console","python","py","yaml","yml","ruby","rb",
+		"toml","ini","conf","perl","r","makefile","make","dockerfile","cmake",
+		"gitignore","properties" };
+	static const char* const SLASH[] = {
+		"c","cpp","c++","cxx","h","hpp","js","jsx","javascript","ts","tsx",
+		"typescript","java","go","golang","rust","rs","cs","csharp","php","swift",
+		"kotlin","kt","glsl","hlsl","scala","dart" };
+	auto has = [&](const char* const* a, size_t n) {
+		for (size_t i = 0; i < n; ++i) if (l == a[i]) return true;
+		return false;
+	};
+	const bool hash = has(HASH, sizeof(HASH) / sizeof(HASH[0]));
+	const bool slash = has(SLASH, sizeof(SLASH) / sizeof(SLASH[0]));
+	if (!hash && !slash) return nullptr;
+
+	for (const char* p = s; p < e; ++p) {
+		const bool boundary = (p == s) || *(p - 1) == ' ' || *(p - 1) == '\t';
+		if (hash && *p == '#' && boundary) return p;
+		if (slash && *p == '/' && (p + 1) < e && *(p + 1) == '/' && boundary) return p;
+	}
+	return nullptr;
+}
+
+// MCDF: render one fenced-code line, coloring a trailing/whole-line comment.
+void imgui_md::render_code(const char* str, const char* str_end)
+{
+	const char* c = find_line_comment(str, str_end, m_code_lang);
+	if (!c) { render_text(str, str_end); return; }
+	if (c > str) render_text(str, c);  // code up to the comment
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.62f, 0.38f, 1.0f));  // comment green
+	render_text(c, str_end);
+	ImGui::PopStyleColor();
+}
+
 
 bool imgui_md::render_entity(const char* str, const char* str_end)
 {
@@ -592,7 +640,8 @@ int imgui_md::text(MD_TEXTTYPE type, const char* str, const char* str_end)
 		render_text(str, str_end);
 		break;
 	case MD_TEXT_CODE:
-		render_text(str, str_end);
+		if (m_code_block) render_code(str, str_end);  // fenced block: highlight comments
+		else render_text(str, str_end);               // inline `code`
 		break;
 	case MD_TEXT_NULLCHAR:
 		break;
