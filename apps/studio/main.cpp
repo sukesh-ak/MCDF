@@ -14,6 +14,7 @@
 // docked host + status bar) is adapted from the YMOVE studio shell.
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -57,6 +59,9 @@
 #include "imgui_md.h"
 #include "IconsFontAwesome6.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -67,7 +72,7 @@ const ImVec4 kDirty{1.00f, 0.70f, 0.20f, 1.0f};
 
 // imgui_md subclass; skip inline images in the E1 preview.
 struct MarkdownView : imgui_md {
-  bool get_image(image_info&) const override { return false; }
+  bool get_image(image_info& nfo) const override;  // defined after the texture cache
   // Visible link color (imgui_md's default uses ImGuiCol_ButtonHovered, which is
   // near-invisible in the dark theme).
   ImVec4 get_color() const override {
@@ -121,8 +126,65 @@ bool g_workdir_is_temp = false;
 std::string g_archive_path;
 std::string g_last_dir;  // persisted last-visited dir for the file dialog
 
-enum class OpenMode { None, Archive, Folder, SaveAs };
+enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage };
 OpenMode g_pending = OpenMode::None;
+
+// ---- preview image textures ----------------------------------------------------
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
+struct Tex {
+  unsigned int id = 0;
+  int w = 0, h = 0;
+};
+std::unordered_map<std::string, Tex> g_tex_cache;
+
+// Load an image (relative to the working dir) as a GL texture, cached by path.
+const Tex* load_texture(const std::string& href) {
+  fs::path p(href);
+  if (p.is_relative() && !g_workdir.empty()) p = g_workdir / p;
+  const std::string key = p.string();
+  if (auto it = g_tex_cache.find(key); it != g_tex_cache.end())
+    return it->second.id ? &it->second : nullptr;
+
+  Tex t;
+  int n = 0;
+  unsigned char* data = stbi_load(key.c_str(), &t.w, &t.h, &n, 4);
+  if (data) {
+    glGenTextures(1, &t.id);
+    glBindTexture(GL_TEXTURE_2D, t.id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, t.w, t.h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    stbi_image_free(data);
+  }
+  const auto res = g_tex_cache.insert_or_assign(key, t);
+  return res.first->second.id ? &res.first->second : nullptr;
+}
+
+void clear_texture_cache() {
+  for (auto& kv : g_tex_cache)
+    if (kv.second.id) { unsigned int id = kv.second.id; glDeleteTextures(1, &id); }
+  g_tex_cache.clear();
+}
+
+bool MarkdownView::get_image(image_info& nfo) const {
+  if (m_href.empty()) return false;
+  const Tex* t = load_texture(m_href);
+  if (!t) return false;
+  nfo.texture_id = static_cast<ImTextureID>(t->id);
+  nfo.size = ImVec2(static_cast<float>(t->w), static_cast<float>(t->h));
+  nfo.uv0 = ImVec2(0, 0);
+  nfo.uv1 = ImVec2(1, 1);
+  nfo.col_tint = ImVec4(1, 1, 1, 1);
+  nfo.col_border = ImVec4(0, 0, 0, 0);
+  return true;
+}
 
 // ---- assets --------------------------------------------------------------------
 
@@ -466,6 +528,7 @@ fs::path make_workdir() {
 }
 
 void cleanup_workdir() {
+  clear_texture_cache();  // preview textures reference the old working dir
   if (g_workdir_is_temp && !g_workdir.empty()) {
     std::error_code ec;
     fs::remove_all(g_workdir, ec);
@@ -646,6 +709,38 @@ void save_as(std::string path) {
   open_archive(path);  // switch the document to the new .mcdf
 }
 
+// Copy an image into the document's assets/ and insert a Markdown reference at
+// the editor cursor. Alignment/size are set via the image title, e.g.
+// ![alt](assets/x.png "width=400 align=center").
+void insert_image(const std::string& src) {
+  if (!g_editor || !g_doc || g_workdir.empty()) return;
+  std::error_code ec;
+  const fs::path assets = g_workdir / "assets";
+  fs::create_directories(assets, ec);
+
+  const fs::path srcp(src);
+  const std::string stem = srcp.stem().string();
+  const std::string ext = srcp.extension().string();
+  std::string safe;
+  for (char ch : stem)
+    safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                ? ch : '_';
+  if (safe.empty()) safe = "image";
+
+  fs::path dest = assets / (safe + ext);
+  for (int i = 1; fs::exists(dest, ec); ++i)
+    dest = assets / (safe + "-" + std::to_string(i) + ext);
+
+  fs::copy_file(srcp, dest, fs::copy_options::overwrite_existing, ec);
+  if (ec) { g_doc->status = "insert image failed: " + ec.message(); return; }
+
+  const std::string rel = "assets/" + dest.filename().string();
+  const std::string md = "![" + stem + "](" + rel + ")";
+  const TextEditor::CursorPosition p = g_editor->GetMainCursorPosition();
+  g_editor->ReplaceSectionText(p.line, p.column, p.line, p.column, md);
+  g_doc->status = "inserted " + rel;
+}
+
 void open_archive_dialog() {
   imfd::Config cfg;
   cfg.title = "Open MCDF document";
@@ -665,6 +760,18 @@ void open_save_as_dialog() {
   cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
   if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
   g_pending = OpenMode::SaveAs;
+  g_dialog.Open(cfg);
+}
+
+void open_insert_image_dialog() {
+  if (!g_doc || !g_doc->has_content) return;
+  imfd::Config cfg;
+  cfg.title = "Insert image";
+  cfg.mode = imfd::Mode::OpenFile;
+  cfg.filters = {{"Images", {".png", ".jpg", ".jpeg", ".gif", ".bmp"}},
+                 {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = OpenMode::InsertImage;
   g_dialog.Open(cfg);
 }
 
@@ -699,6 +806,12 @@ void draw_menu_bar() {
     ImGui::MenuItem(ICON_FA_PEN "  Editor", nullptr, &g_show_editor);
     ImGui::MenuItem(ICON_FA_FILE_LINES "  Preview", nullptr, &g_show_preview);
     ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Document", nullptr, &g_show_document);
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("Insert")) {
+    const bool can = g_doc && g_doc->has_content;
+    if (ImGui::MenuItem(ICON_FA_IMAGE "  Image...", nullptr, false, can))
+      open_insert_image_dialog();
     ImGui::EndMenu();
   }
   ImGui::EndMenuBar();
@@ -988,6 +1101,7 @@ int main() {
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
       else if (g_pending == OpenMode::SaveAs) save_as(picked);
+      else if (g_pending == OpenMode::InsertImage) insert_image(picked);
       g_pending = OpenMode::None;
     }
     if (dlg_res != imfd::Result::None) save_preferences(g_window);  // persist bookmarks/last dir

@@ -25,6 +25,9 @@
 
 #include "imgui_md.h"
 
+#include <cstdlib>  // MCDF: std::atof for image width= hint
+#include <string>
+
 imgui_md::imgui_md()
 {
 	m_md.abi_version = 0;
@@ -293,6 +296,20 @@ void imgui_md::SPAN_IMG(const MD_SPAN_IMG_DETAIL* d, bool e)
 			nfo.size.x *= scale;
 			nfo.size.y *= scale;
 
+			// MCDF: honor "width=<px>" and "align=left|center|right" hints in the
+			// image title, e.g. ![alt](assets/x.png "width=400 align=center").
+			int align = 0;  // 0 left, 1 center, 2 right
+			if (d->title.size && nfo.size.x > 0.0f) {
+				const std::string tt(d->title.text, d->title.size);
+				const float ratio = nfo.size.y / nfo.size.x;
+				const auto wp = tt.find("width=");
+				if (wp != std::string::npos) {
+					const float w = (float)std::atof(tt.c_str() + wp + 6);
+					if (w > 0.0f) { nfo.size.x = w; nfo.size.y = w * ratio; }
+				}
+				if (tt.find("align=center") != std::string::npos) align = 1;
+				else if (tt.find("align=right") != std::string::npos) align = 2;
+			}
 
 			ImVec2 const csz = ImGui::GetContentRegionAvail();
 			if (nfo.size.x > csz.x) {
@@ -300,6 +317,8 @@ void imgui_md::SPAN_IMG(const MD_SPAN_IMG_DETAIL* d, bool e)
 				nfo.size.x = csz.x;
 				nfo.size.y = csz.x * r;
 			}
+			if (align == 1) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (csz.x - nfo.size.x) * 0.5f);
+			else if (align == 2) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (csz.x - nfo.size.x));
 
 			ImGui::Image(nfo.texture_id, nfo.size, nfo.uv0, nfo.uv1, nfo.col_tint, nfo.col_border);
 
