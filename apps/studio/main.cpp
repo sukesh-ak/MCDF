@@ -114,6 +114,7 @@ struct Prefs {
   float font_size = 16.0f;
   int ui_idx = 0;
   int mono_idx = 0;
+  bool idle_throttle = true;  // lower frame rate when there's no input
 };
 Prefs g_prefs;
 std::vector<std::pair<std::string, std::string>> g_fonts;
@@ -123,6 +124,7 @@ bool g_show_document = false;  // container-inspector panel
 
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
+double g_last_input = 0.0;  // glfwGetTime() of the last user input (idle throttle)
 std::string g_last_dir;
 fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
@@ -267,6 +269,8 @@ void load_preferences() {
       g_saved_ui_font = v;
     } else if (k == "mono_font") {
       g_saved_mono_font = v;
+    } else if (k == "idle_throttle") {
+      g_prefs.idle_throttle = (v != "0");
     } else if (k == "window") {
       std::sscanf(v.c_str(), "%d %d %d %d", &g_win_geom.w, &g_win_geom.h,
                   &g_win_geom.x, &g_win_geom.y);
@@ -287,6 +291,7 @@ void save_preferences(GLFWwindow* w) {
   const int n = static_cast<int>(g_fonts.size());
   f << "theme=" << g_prefs.theme << '\n';
   f << "font_size=" << g_prefs.font_size << '\n';
+  f << "idle_throttle=" << (g_prefs.idle_throttle ? 1 : 0) << '\n';
   f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
   f << "mono_font=" << (g_prefs.mono_idx < n ? g_fonts[g_prefs.mono_idx].first : "") << '\n';
   if (w) {
@@ -813,6 +818,14 @@ void draw_settings() {
   }
   ImGui::TextDisabled("Editor font applies to the content.md pane (use a monospace face).");
 
+  section("Performance");
+  ImGui::Checkbox("Reduce frame rate when idle", &g_prefs.idle_throttle);
+  ImGui::SameLine();
+  ImGui::TextDisabled("(?)");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Lower CPU/GPU use when there is no input.\n"
+                      "A document app needn't redraw at 60fps while idle.");
+
   ImGui::Spacing();
   ImGui::Separator();
   if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
@@ -1013,6 +1026,16 @@ void handle_shortcuts() {
   if (ImGui::IsKeyPressed(ImGuiKey_Comma)) g_show_settings = true;
 }
 
+// Idle throttle: how long to sleep before the next frame, growing with idle
+// time. 0 = render at vsync (recent input).
+double idle_wait_timeout() {
+  const double idle = glfwGetTime() - g_last_input;
+  if (idle < 0.5) return 0.0;          // recently active
+  if (idle < 5.0) return 1.0 / 30.0;   // ~30 fps
+  if (idle < 30.0) return 1.0 / 10.0;  // ~10 fps
+  return 0.25;                          // ~4 fps deep idle
+}
+
 void glfw_error_callback(int error, const char* description) {
   std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
@@ -1064,8 +1087,24 @@ int main() {
   rebuild_fonts();
   apply_theme(g_prefs.theme);
 
+  g_last_input = glfwGetTime();
   while (!glfwWindowShouldClose(window) && !g_quit) {
-    glfwPollEvents();
+    // Idle throttle: sleep between frames when there is no input (a document app
+    // needn't redraw at 60fps while idle), but wake instantly on any event.
+    if (g_prefs.idle_throttle) {
+      const ImGuiIO& iio = ImGui::GetIO();
+      bool active = iio.MouseDelta.x != 0.0f || iio.MouseDelta.y != 0.0f ||
+                    iio.MouseWheel != 0.0f || iio.MouseWheelH != 0.0f ||
+                    ImGui::IsAnyMouseDown() || iio.InputQueueCharacters.Size > 0;
+      for (int k = ImGuiKey_NamedKey_BEGIN; !active && k < ImGuiKey_NamedKey_END; ++k)
+        if (ImGui::IsKeyDown(static_cast<ImGuiKey>(k))) active = true;
+      if (active) g_last_input = glfwGetTime();
+      const double wait = idle_wait_timeout();
+      if (wait > 0.0) glfwWaitEventsTimeout(wait);
+      else glfwPollEvents();
+    } else {
+      glfwPollEvents();
+    }
     if (g_font_rebuild) rebuild_fonts();
 
     ImGui_ImplOpenGL3_NewFrame();
