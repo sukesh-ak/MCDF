@@ -786,8 +786,11 @@ void imgui_md::open_url() const
 
 void imgui_md::soft_break()
 {
-	//Example:
-#if 0
-	ImGui::NewLine();
-#endif
+	// MCDF: a soft line break inside a paragraph (a source-wrapped line, e.g.
+	// CRLF/LF between "vcpkg" and "are") is whitespace - render it as a space so
+	// the lines keep their separator and reflow at the window width, instead of
+	// joining tightly ("vcpkg\nare" -> "vcpkgare", "declared in\n[link]" ->
+	// "declared in[link]"). Measured from an interior space so it isn't trimmed.
+	const float sp_w = ImGui::CalcTextSize("x x").x - ImGui::CalcTextSize("xx").x;
+	ImGui::SameLine(0.0f, sp_w);
 }
