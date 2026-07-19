@@ -115,6 +115,8 @@ struct Prefs {
   int ui_idx = 0;
   int mono_idx = 0;
   bool idle_throttle = true;  // lower frame rate when there's no input
+  std::string wallpaper_path; // optional background image
+  float wallpaper_opacity = 0.35f;
 };
 Prefs g_prefs;
 std::vector<std::pair<std::string, std::string>> g_fonts;
@@ -128,7 +130,7 @@ std::string g_last_dir;
 std::vector<std::string> g_recent;  // recently opened documents (most-recent first)
 fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
-enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage };
+enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage, Wallpaper };
 OpenMode g_pending = OpenMode::None;
 
 bool is_dirty(const Document& d) {
@@ -176,6 +178,55 @@ void clear_texture_cache() {
   for (auto& kv : g_tex_cache)
     if (kv.second.id) { unsigned int id = kv.second.id; glDeleteTextures(1, &id); }
   g_tex_cache.clear();
+}
+
+// Optional background image (behind the dockspace), like the YMOVE studio.
+unsigned int g_wallpaper_tex = 0;
+int g_wallpaper_w = 0, g_wallpaper_h = 0;
+
+void unload_wallpaper() {
+  if (g_wallpaper_tex) {
+    unsigned int t = g_wallpaper_tex;
+    glDeleteTextures(1, &t);
+    g_wallpaper_tex = 0;
+    g_wallpaper_w = g_wallpaper_h = 0;
+  }
+}
+
+void load_wallpaper(const std::string& path) {
+  unload_wallpaper();
+  if (path.empty()) return;
+  int n = 0;
+  unsigned char* data = stbi_load(path.c_str(), &g_wallpaper_w, &g_wallpaper_h, &n, 4);
+  if (!data) { g_wallpaper_w = g_wallpaper_h = 0; return; }
+  glGenTextures(1, &g_wallpaper_tex);
+  glBindTexture(GL_TEXTURE_2D, g_wallpaper_tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_wallpaper_w, g_wallpaper_h, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, data);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  stbi_image_free(data);
+}
+
+// Aspect-fill the viewport on the background draw list (behind all windows).
+void render_wallpaper() {
+  if (!g_wallpaper_tex || g_wallpaper_w <= 0 || g_wallpaper_h <= 0) return;
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  const ImVec2 pos = vp->Pos, size = vp->Size;
+  const float va = size.x / size.y;
+  const float ia = static_cast<float>(g_wallpaper_w) / static_cast<float>(g_wallpaper_h);
+  ImVec2 draw;
+  if (va > ia) { draw.x = size.x; draw.y = size.x / ia; }
+  else { draw.y = size.y; draw.x = size.y * ia; }
+  const ImVec2 p0 = {pos.x + (size.x - draw.x) * 0.5f, pos.y + (size.y - draw.y) * 0.5f};
+  const ImVec2 p1 = {p0.x + draw.x, p0.y + draw.y};
+  const int a = static_cast<int>(std::clamp(g_prefs.wallpaper_opacity, 0.0f, 1.0f) * 255.0f);
+  ImGui::GetBackgroundDrawList()->AddImage(
+      static_cast<ImTextureID>(g_wallpaper_tex), p0, p1, ImVec2(0, 0), ImVec2(1, 1),
+      IM_COL32(255, 255, 255, a));
 }
 
 bool MarkdownView::get_image(image_info& nfo) const {
@@ -271,6 +322,10 @@ void load_preferences() {
       g_saved_mono_font = v;
     } else if (k == "idle_throttle") {
       g_prefs.idle_throttle = (v != "0");
+    } else if (k == "wallpaper") {
+      g_prefs.wallpaper_path = v;
+    } else if (k == "wallpaper_opacity") {
+      try { g_prefs.wallpaper_opacity = std::stof(v); } catch (...) {}
     } else if (k == "window") {
       std::sscanf(v.c_str(), "%d %d %d %d", &g_win_geom.w, &g_win_geom.h,
                   &g_win_geom.x, &g_win_geom.y);
@@ -294,6 +349,8 @@ void save_preferences(GLFWwindow* w) {
   f << "theme=" << g_prefs.theme << '\n';
   f << "font_size=" << g_prefs.font_size << '\n';
   f << "idle_throttle=" << (g_prefs.idle_throttle ? 1 : 0) << '\n';
+  f << "wallpaper=" << g_prefs.wallpaper_path << '\n';
+  f << "wallpaper_opacity=" << g_prefs.wallpaper_opacity << '\n';
   f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
   f << "mono_font=" << (g_prefs.mono_idx < n ? g_fonts[g_prefs.mono_idx].first : "") << '\n';
   if (w) {
@@ -775,6 +832,16 @@ void open_insert_image_dialog() {
   g_dialog.Open(cfg);
 }
 
+void open_wallpaper_dialog() {
+  imfd::Config cfg;
+  cfg.title = "Choose background image";
+  cfg.mode = imfd::Mode::OpenFile;
+  cfg.filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp"}}, {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = OpenMode::Wallpaper;
+  g_dialog.Open(cfg);
+}
+
 // ---- UI ------------------------------------------------------------------------
 
 void draw_settings() {
@@ -845,6 +912,19 @@ void draw_settings() {
     ImGui::SetTooltip("Lower CPU/GPU use when there is no input.\n"
                       "A document app needn't redraw at 60fps while idle.");
 
+  section("Background");
+  ImGui::TextDisabled("%s", g_prefs.wallpaper_path.empty()
+                                ? "No background image"
+                                : g_prefs.wallpaper_path.c_str());
+  if (ImGui::Button(ICON_FA_IMAGE "  Choose image...")) open_wallpaper_dialog();
+  ImGui::SameLine();
+  if (ImGui::Button("Clear")) {
+    g_prefs.wallpaper_path.clear();
+    unload_wallpaper();
+  }
+  ImGui::SetNextItemWidth(200.0f);
+  ImGui::SliderFloat("Opacity", &g_prefs.wallpaper_opacity, 0.0f, 1.0f, "%.2f");
+
   ImGui::Spacing();
   ImGui::Separator();
   if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
@@ -900,11 +980,16 @@ void draw_host() {
   ImGui::SetNextWindowSize(vp->WorkSize);
   ImGui::SetNextWindowViewport(vp->ID);
 
-  const ImGuiWindowFlags flags =
+  ImGuiWindowFlags flags =
       ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
       ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
       ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
       ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+  ImGuiDockNodeFlags dock_flags = ImGuiDockNodeFlags_None;
+  if (g_wallpaper_tex) {  // let the wallpaper show through the dock host + empty area
+    flags |= ImGuiWindowFlags_NoBackground;
+    dock_flags |= ImGuiDockNodeFlags_PassthruCentralNode;
+  }
 
   const float def_pad_y = ImGui::GetStyle().FramePadding.y;
   const float status_h = ImGui::GetFontSize() + def_pad_y * 2.0f +
@@ -919,7 +1004,7 @@ void draw_host() {
   ImGui::PopStyleVar(3);
 
   const ImGuiID dock_id = ImGui::GetID("StudioDock");
-  ImGui::DockSpace(dock_id, ImVec2(0.0f, -status_h));
+  ImGui::DockSpace(dock_id, ImVec2(0.0f, -status_h), dock_flags);
 
   if (g_documents.empty()) {
     ImGui::SetCursorPos(ImVec2(vp->WorkSize.x * 0.5f - 130.0f, vp->WorkSize.y * 0.4f));
@@ -1115,6 +1200,7 @@ int main() {
   resolve_saved_fonts();
   rebuild_fonts();
   apply_theme(g_prefs.theme);
+  load_wallpaper(g_prefs.wallpaper_path);
 
   g_last_input = glfwGetTime();
   while (!glfwWindowShouldClose(window) && !g_quit) {
@@ -1141,6 +1227,7 @@ int main() {
     ImGui::NewFrame();
 
     handle_shortcuts();
+    render_wallpaper();
     draw_host();
 
     const imfd::Result dlg_res = g_dialog.Draw();
@@ -1150,6 +1237,7 @@ int main() {
       else if (g_pending == OpenMode::Folder) open_folder(picked);
       else if (g_pending == OpenMode::SaveAs && g_target_doc) save_as(*g_target_doc, picked);
       else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
+      else if (g_pending == OpenMode::Wallpaper) { g_prefs.wallpaper_path = picked; load_wallpaper(picked); }
       g_pending = OpenMode::None;
       g_target_doc = nullptr;
     } else if (dlg_res == imfd::Result::Cancelled) {
@@ -1189,6 +1277,7 @@ int main() {
   for (auto& d : g_documents) close_document(*d);
   g_documents.clear();
   clear_texture_cache();
+  unload_wallpaper();
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();
