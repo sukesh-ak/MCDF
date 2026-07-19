@@ -141,9 +141,9 @@ void imgui_md::BLOCK_H(const MD_BLOCK_H_DETAIL* d, bool e)
 	}
 }
 
-void imgui_md::BLOCK_DOC(bool)
+void imgui_md::BLOCK_DOC(bool e)
 {
-
+	if (e) m_code_id = 0;  // reset the per-render code-block child id counter
 }
 
 void imgui_md::BLOCK_QUOTE(bool)
@@ -152,7 +152,21 @@ void imgui_md::BLOCK_QUOTE(bool)
 }
 void imgui_md::BLOCK_CODE(const MD_BLOCK_CODE_DETAIL*, bool e)
 {
+	// MCDF: render fenced code blocks in the monospace face inside a framed,
+	// auto-height box (get_font() returns the mono font while m_is_code is set).
 	m_is_code = e;
+	if (e) {
+		ImGui::NewLine();
+		ImGui::PushID(static_cast<int>(m_code_id++));
+		ImGui::BeginChild("##mcdf_code", ImVec2(0.0f, 0.0f),
+			ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_FrameStyle);
+		set_font(true);
+	} else {
+		set_font(false);
+		ImGui::EndChild();
+		ImGui::PopID();
+		ImGui::NewLine();
+	}
 }
 
 void imgui_md::BLOCK_HTML(bool)
@@ -336,9 +350,11 @@ void imgui_md::SPAN_IMG(const MD_SPAN_IMG_DETAIL* d, bool e)
 	}
 }
 
-void imgui_md::SPAN_CODE(bool)
+void imgui_md::SPAN_CODE(bool e)
 {
-
+	// MCDF: inline `code` in the monospace face.
+	m_is_code = e;
+	set_font(e);
 }
 
 
@@ -378,11 +394,16 @@ void imgui_md::render_text(const char* str, const char* str_end)
 	// the edge spaces here and represent them with explicit SameLine spacing so
 	// they survive regardless; interior word spaces render normally. (The space
 	// width is measured from an interior space so it is not itself trimmed.)
+	// Code text keeps all its whitespace (indentation is significant, and code
+	// has no inline links), so only prose gets the edge-space handling.
+	const bool code = m_is_code;
 	const float sp_w = ImGui::CalcTextSize("x x").x - ImGui::CalcTextSize("xx").x;
-	const bool lead_space = (str < str_end && *str == ' ');
-	const bool trail_space = (str_end > str && *(str_end - 1) == ' ');
-	while (str < str_end && *str == ' ') ++str;
-	while (str_end > str && *(str_end - 1) == ' ') --str_end;
+	const bool lead_space = !code && (str < str_end && *str == ' ');
+	const bool trail_space = !code && (str_end > str && *(str_end - 1) == ' ');
+	if (!code) {
+		while (str < str_end && *str == ' ') ++str;
+		while (str_end > str && *(str_end - 1) == ' ') --str_end;
+	}
 	if (str >= str_end) {  // the run was only whitespace
 		ImGui::SameLine(0.0f, (lead_space || trail_space) ? sp_w : 0.0f);
 		return;

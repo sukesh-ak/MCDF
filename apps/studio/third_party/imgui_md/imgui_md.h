@@ -157,6 +157,8 @@ private:
 
 	std::vector<std::string> m_div_stack;
 
+	unsigned m_code_id = 0;  // MCDF: per-render unique id for code-block child windows
+
 	MD_PARSER m_md;
 };
 

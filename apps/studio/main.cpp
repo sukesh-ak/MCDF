@@ -94,6 +94,7 @@ struct Document {
 // against g_render_workdir (the document currently being previewed).
 struct MarkdownView : imgui_md {
   bool get_image(image_info& nfo) const override;  // defined after the texture cache
+  ImFont* get_font() const override;               // defined after g_mono is declared
   ImVec4 get_color() const override {
     if (!m_href.empty()) return ImVec4(0.32f, 0.66f, 1.00f, 1.00f);
     return ImGui::GetStyle().Colors[ImGuiCol_Text];
@@ -240,6 +241,13 @@ bool MarkdownView::get_image(image_info& nfo) const {
   nfo.col_tint = ImVec4(1, 1, 1, 1);
   nfo.col_border = ImVec4(0, 0, 0, 0);
   return true;
+}
+
+// Code (fenced blocks + inline spans) renders in the monospace face; everything
+// else uses the default UI font.
+ImFont* MarkdownView::get_font() const {
+  if (m_is_code && g_mono) return g_mono;
+  return nullptr;  // default UI font (imgui_md handles heading sizing itself)
 }
 
 // ---- assets + config -----------------------------------------------------------
@@ -1021,6 +1029,19 @@ void draw_host() {
   ImGui::End();
 }
 
+// Right-click menu inside the source editor: standard edit ops + Insert Image.
+void editor_context_menu(Document& d) {
+  const bool sel = d.editor->AnyCursorHasSelection();
+  if (ImGui::MenuItem(ICON_FA_SCISSORS "  Cut", "Ctrl+X", false, sel)) d.editor->Cut();
+  if (ImGui::MenuItem(ICON_FA_COPY "  Copy", "Ctrl+C", false, sel)) d.editor->Copy();
+  if (ImGui::MenuItem(ICON_FA_PASTE "  Paste", "Ctrl+V")) d.editor->Paste();
+  ImGui::Separator();
+  if (ImGui::MenuItem(ICON_FA_IMAGE "  Insert Image...")) {
+    g_active = &d;  // the dialog inserts into the active document
+    open_insert_image_dialog();
+  }
+}
+
 // One document = a dockable window with an editor | preview split.
 void draw_document_window(Document& d) {
   const std::string name = d.path.empty() ? std::string("untitled")
@@ -1048,6 +1069,7 @@ void draw_document_window(Document& d) {
 #else
         ImGui::PushFont(g_mono);
 #endif
+      d.editor->SetTextContextMenuCallback([&d](int, int) { editor_context_menu(d); });
       d.editor->Render("##ed", ImGui::GetContentRegionAvail(), false);
       if (g_mono) ImGui::PopFont();
       ImGui::EndChild();
@@ -1082,12 +1104,26 @@ void draw_document_window(Document& d) {
 // Formatted document summary shown as a tooltip on the footer's file label.
 void document_info_tooltip(const Document& d) {
   ImGui::BeginTooltip();
-  if (!d.title.empty()) ImGui::Text("Title:     %s", d.title.c_str());
-  ImGui::Text("Type:      %s   (from schema.yaml)",
-              d.doc_type.empty() ? "(none)" : d.doc_type.c_str());
-  ImGui::Text("Kind:      %s", d.is_archive ? ".mcdf document" : "unpacked folder");
-  ImGui::Text("Headings:  %d", d.heading_count);
-  ImGui::Text("Members:   %d", static_cast<int>(d.files.size()));
+  // Two columns: dim labels auto-size to the widest, values left-align in a
+  // single column beside them.
+  if (ImGui::BeginTable("##docinfo", 2, ImGuiTableFlags_SizingFixedFit)) {
+    const auto lbl = [](const char* t) {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextDisabled("%s", t);
+      ImGui::TableNextColumn();
+    };
+    if (!d.title.empty()) { lbl("Title"); ImGui::TextUnformatted(d.title.c_str()); }
+    lbl("Type");
+    ImGui::TextUnformatted(d.doc_type.empty() ? "(none)" : d.doc_type.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(from schema.yaml)");
+    lbl("Kind");
+    ImGui::TextUnformatted(d.is_archive ? ".mcdf document" : "unpacked folder");
+    lbl("Headings"); ImGui::Text("%d", d.heading_count);
+    lbl("Members");  ImGui::Text("%d", static_cast<int>(d.files.size()));
+    ImGui::EndTable();
+  }
   if (!d.files.empty()) {
     ImGui::Separator();
     for (const auto& f : d.files) ImGui::BulletText("%s", f.c_str());
