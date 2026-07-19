@@ -417,7 +417,13 @@ void imgui_md::render_text(const char* str, const char* str_end)
 
 		str = te;
 
-		while (str < str_end && *str == ' ')++str;
+		// MCDF: skip spaces at a wrap boundary, but keep a single trailing space
+		// so text before an inline link/span keeps its separator (imgui_md
+		// otherwise renders "in[link]" without the source space).
+		while (str < str_end && *str == ' ') {
+			if (str + 1 == str_end) break;
+			++str;
+		}
 	}
 
 	if (!is_lf)ImGui::SameLine(0.0f, 0.0f);
