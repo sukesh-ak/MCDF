@@ -11,3 +11,8 @@ Thumbs.db
 /dist/
 /build/
 node_modules/
+
+# MCDF Studio runtime config (ImGui layout + app prefs), written at run time
+/imgui.ini
+/mcdf.ini
+/preferences.ini
