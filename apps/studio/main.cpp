@@ -105,6 +105,7 @@ std::vector<std::unique_ptr<Document>> g_documents;
 int g_next_doc_id = 1;
 Document* g_active = nullptr;     // focused document (menu ops target it)
 Document* g_target_doc = nullptr; // document a Save As / Insert dialog acts on
+ImGuiID g_dockspace_id = 0;       // main dockspace; new documents dock here by default
 
 imfd::FileDialog g_dialog;
 ImFont* g_ui = nullptr;
@@ -1016,6 +1017,7 @@ void draw_host() {
   ImGui::PopStyleVar(4);  // incl. FramePadding -> dock tabs use the normal height
 
   const ImGuiID dock_id = ImGui::GetID("StudioDock");
+  g_dockspace_id = dock_id;  // documents dock here by default (see draw_document_window)
   ImGui::DockSpace(dock_id, ImVec2(0.0f, -status_h), dock_flags);
 
   if (g_documents.empty()) {
@@ -1048,6 +1050,9 @@ void draw_document_window(Document& d) {
                                           : fs::path(d.path).filename().string();
   const std::string label =
       (is_dirty(d) ? name + " *" : name) + "###doc" + std::to_string(d.id);
+  // Dock new documents into the main dockspace by default so first-run users get
+  // a tabbed layout (FirstUseEver leaves any later manual (re)docking intact).
+  if (g_dockspace_id) ImGui::SetNextWindowDockID(g_dockspace_id, ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(920, 640), ImGuiCond_FirstUseEver);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));  // panes fill to edge
   const bool win_open = ImGui::Begin(label.c_str(), &d.open);
