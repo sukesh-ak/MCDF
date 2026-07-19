@@ -9,7 +9,7 @@
 // editor | preview split (source Markdown editor + live imgui_md/md4c preview).
 // Images attach into the container's assets/ and render in the preview.
 //
-// Layout is ImGui's own (imgui.ini at a stable path); theme/fonts/window/dialog
+// Layout is ImGui's own (mcdf.ini at a stable path); theme/fonts/window/dialog
 // bookmarks live in a separate preferences.ini. Shell look adapted from YMOVE.
 
 #include <algorithm>
@@ -1205,7 +1205,7 @@ int main() {
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-  static std::string ini_path = (config_dir() / "imgui.ini").string();
+  static std::string ini_path = (config_dir() / "mcdf.ini").string();
   io.IniFilename = ini_path.c_str();
   ImGui::StyleColorsDark();
   ImGui_ImplGlfw_InitForOpenGL(window, true);

@@ -373,6 +373,22 @@ void imgui_md::render_text(const char* str, const char* str_end)
 	const ImGuiStyle& s = ImGui::GetStyle();
 	bool is_lf = false;
 
+	// MCDF: ImGui trims a text item's leading/trailing spaces, which drops the
+	// separator around inline links ("and [link] are" -> "and[link]are"). Trim
+	// the edge spaces here and represent them with explicit SameLine spacing so
+	// they survive regardless; interior word spaces render normally. (The space
+	// width is measured from an interior space so it is not itself trimmed.)
+	const float sp_w = ImGui::CalcTextSize("x x").x - ImGui::CalcTextSize("xx").x;
+	const bool lead_space = (str < str_end && *str == ' ');
+	const bool trail_space = (str_end > str && *(str_end - 1) == ' ');
+	while (str < str_end && *str == ' ') ++str;
+	while (str_end > str && *(str_end - 1) == ' ') --str_end;
+	if (str >= str_end) {  // the run was only whitespace
+		ImGui::SameLine(0.0f, (lead_space || trail_space) ? sp_w : 0.0f);
+		return;
+	}
+	if (lead_space) ImGui::SameLine(0.0f, sp_w);
+
 	while (!m_is_image && str < str_end) {
 
 		const char* te = str_end;
@@ -417,16 +433,10 @@ void imgui_md::render_text(const char* str, const char* str_end)
 
 		str = te;
 
-		// MCDF: skip spaces at a wrap boundary, but keep a single trailing space
-		// so text before an inline link/span keeps its separator (imgui_md
-		// otherwise renders "in[link]" without the source space).
-		while (str < str_end && *str == ' ') {
-			if (str + 1 == str_end) break;
-			++str;
-		}
+		while (str < str_end && *str == ' ')++str;  // skip spaces at a wrap boundary
 	}
 
-	if (!is_lf)ImGui::SameLine(0.0f, 0.0f);
+	if (!is_lf)ImGui::SameLine(0.0f, trail_space ? sp_w : 0.0f);
 }
 
 
