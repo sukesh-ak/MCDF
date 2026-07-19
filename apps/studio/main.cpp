@@ -114,14 +114,14 @@ bool g_show_settings = false;
 // Panel visibility (toggled from the View menu; the panels' own [x] closes them).
 bool g_show_editor = true;
 bool g_show_preview = true;
-bool g_show_document = true;
+bool g_show_document = false;  // container inspector - hidden by default
 
 fs::path g_workdir;
 bool g_workdir_is_temp = false;
 std::string g_archive_path;
 std::string g_last_dir;  // persisted last-visited dir for the file dialog
 
-enum class OpenMode { None, Archive, Folder };
+enum class OpenMode { None, Archive, Folder, SaveAs };
 OpenMode g_pending = OpenMode::None;
 
 // ---- assets --------------------------------------------------------------------
@@ -611,6 +611,41 @@ void save_document() {
 
 // ---- UI ------------------------------------------------------------------------
 
+// Save the current document to a chosen .mcdf path (leaving the original
+// untouched), then switch the editor to the new file.
+void save_as(std::string path) {
+  if (!g_editor || !g_doc || g_workdir.empty()) return;
+  if (path.size() < 5 || path.substr(path.size() - 5) != ".mcdf") path += ".mcdf";
+
+  // Build the archive from a throwaway copy so "Save As" never modifies the
+  // current working copy / source folder.
+  std::error_code ec;
+  const fs::path tmp = make_workdir();
+  fs::copy(g_workdir, tmp,
+           fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+
+  if (auto dir = mcdf::DirectoryContainer::open(tmp)) {
+    (void)(*dir)->write("content.md", g_editor->GetText());
+    if ((*dir)->contains("manifest.json"))
+      if (auto c = mcdf::open_container(tmp))
+        if (auto m = mcdf::build_manifest(**c))
+          if (auto j = mcdf::manifest_to_canonical_json(*m))
+            (void)(*dir)->write("manifest.json", *j);
+  }
+
+  bool ok = false;
+  if (auto c = mcdf::open_container(tmp))
+    if (auto archive = mcdf::pack_container(**c))
+      ok = write_file_bytes(path, *archive);
+  fs::remove_all(tmp, ec);
+
+  if (!ok) {
+    g_doc->status = "save-as failed: " + path;
+    return;
+  }
+  open_archive(path);  // switch the document to the new .mcdf
+}
+
 void open_archive_dialog() {
   imfd::Config cfg;
   cfg.title = "Open MCDF document";
@@ -618,6 +653,18 @@ void open_archive_dialog() {
   cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
   if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
   g_pending = OpenMode::Archive;
+  g_dialog.Open(cfg);
+}
+
+void open_save_as_dialog() {
+  if (!g_doc || !g_doc->has_content) return;
+  imfd::Config cfg;
+  cfg.title = "Save MCDF document as";
+  cfg.mode = imfd::Mode::SaveFile;
+  cfg.default_name = fs::path(g_doc->path).filename().string();
+  cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = OpenMode::SaveAs;
   g_dialog.Open(cfg);
 }
 
@@ -638,6 +685,8 @@ void draw_menu_bar() {
     const bool can_save = g_doc && g_doc->has_content;
     if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
       save_document();
+    if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save As...", "Ctrl+Shift+S", false, can_save))
+      open_save_as_dialog();
     ImGui::Separator();
     if (ImGui::MenuItem(ICON_FA_GEAR "  Settings...", "Ctrl+,"))
       g_show_settings = true;
@@ -855,7 +904,10 @@ void draw_preview_panel() {
 void handle_shortcuts() {
   const ImGuiIO& io = ImGui::GetIO();
   if (!io.KeyCtrl) return;
-  if (ImGui::IsKeyPressed(ImGuiKey_S) && g_doc && g_doc->has_content) save_document();
+  if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+    if (io.KeyShift) open_save_as_dialog();
+    else if (g_doc && g_doc->has_content) save_document();
+  }
   if (ImGui::IsKeyPressed(ImGuiKey_O)) open_archive_dialog();
   if (ImGui::IsKeyPressed(ImGuiKey_Q)) g_quit = true;
   if (ImGui::IsKeyPressed(ImGuiKey_Comma)) g_show_settings = true;
@@ -935,6 +987,7 @@ int main() {
       const std::string picked = g_dialog.SelectedPath();
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
+      else if (g_pending == OpenMode::SaveAs) save_as(picked);
       g_pending = OpenMode::None;
     }
     if (dlg_res != imfd::Result::None) save_preferences(g_window);  // persist bookmarks/last dir
