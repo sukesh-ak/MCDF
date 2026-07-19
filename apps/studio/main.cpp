@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The MCDF Project
 //
-// MCDF Studio - document-centric editor shell.
+// MCDF Studio - multi-document, document-centric editor.
 //
-// A Dear ImGui desktop editor that links libmcdf directly (no CLI/FFI seam) and
-// treats a single .mcdf file as "the document" - like .docx. Opening a .mcdf
-// unpacks it to a hidden temp working copy; Save re-packs it back into the same
-// .mcdf file. It provides a syntax-highlighted Markdown source editor
-// (ImGuiColorTextEdit, monospace), a live rendered preview (imgui_md over md4c),
-// dirty tracking, a themed docked shell, and a status bar.
+// Links libmcdf directly (no CLI/FFI). A single .mcdf file is "the document"
+// (like .docx): opening one unpacks it to a hidden temp working copy; Save
+// re-packs it. Each open file is its own dockable window containing an
+// editor | preview split (source Markdown editor + live imgui_md/md4c preview).
+// Images attach into the container's assets/ and render in the preview.
 //
-// The look (dark theme, Roboto UI + RobotoMono editor + FontAwesome icons,
-// docked host + status bar) is adapted from the YMOVE studio shell.
+// Layout is ImGui's own (imgui.ini at a stable path); theme/fonts/window/dialog
+// bookmarks live in a separate preferences.ini. Shell look adapted from YMOVE.
 
 #include <algorithm>
 #include <cctype>
@@ -32,7 +31,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
-#include <GLFW/glfw3.h>  // pulls in <GL/gl.h> for the frame clear (GL 1.1)
+#include <GLFW/glfw3.h>  // pulls in <GL/gl.h> for textures + the frame clear
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -41,10 +40,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX  // keep windows.h from defining min/max macros (breaks std::min/max)
 #endif
-#include <windows.h>  // GetModuleFileNameA for assets_dir()
-#include <dwmapi.h>   // dark native title bar
+#include <windows.h>
+#include <dwmapi.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>  // glfwGetWin32Window
+#include <GLFW/glfw3native.h>
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
@@ -66,68 +65,73 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Accent + warning colors used by the status bar / dirty marker.
 const ImVec4 kAccent{0.00f, 0.47f, 0.93f, 1.0f};
 const ImVec4 kDirty{1.00f, 0.70f, 0.20f, 1.0f};
 
-// imgui_md subclass; skip inline images in the E1 preview.
+// An open document: its own editor, working copy, and save state.
+struct Document {
+  int id = 0;
+  bool open = true;         // window open flag ([x] closes it)
+  float split = 0.5f;       // editor|preview split ratio
+
+  std::string path;         // .mcdf file or folder shown to the user
+  std::string status;
+  std::vector<std::string> files;
+  bool has_content = false;
+  bool is_archive = false;  // opened from a .mcdf file
+  std::string title;        // metadata.title
+  std::string doc_type;     // schema.document_type
+  int heading_count = 0;
+
+  std::unique_ptr<TextEditor> editor;
+  std::size_t saved_undo = 0;
+  fs::path workdir;
+  bool workdir_is_temp = false;
+  std::string archive_path;  // .mcdf to save back to (empty in folder mode)
+};
+
+// imgui_md subclass: image textures + a visible link color. get_image resolves
+// against g_render_workdir (the document currently being previewed).
 struct MarkdownView : imgui_md {
   bool get_image(image_info& nfo) const override;  // defined after the texture cache
-  // Visible link color (imgui_md's default uses ImGuiCol_ButtonHovered, which is
-  // near-invisible in the dark theme).
   ImVec4 get_color() const override {
     if (!m_href.empty()) return ImVec4(0.32f, 0.66f, 1.00f, 1.00f);
     return ImGui::GetStyle().Colors[ImGuiCol_Text];
   }
 };
 
-// The open document. The editable content.md text lives in the TextEditor; the
-// container files live under g_workdir.
-struct OpenDoc {
-  std::string path;
-  std::string status;
-  std::vector<std::string> files;
-  bool has_content = false;
-  bool is_archive = false;
-  std::string title;
-  std::string doc_type;
-  int heading_count = 0;
-};
+std::vector<std::unique_ptr<Document>> g_documents;
+int g_next_doc_id = 1;
+Document* g_active = nullptr;     // focused document (menu ops target it)
+Document* g_target_doc = nullptr; // document a Save As / Insert dialog acts on
 
-std::optional<OpenDoc> g_doc;
 imfd::FileDialog g_dialog;
-std::unique_ptr<TextEditor> g_editor;
-std::size_t g_saved_undo = 0;
-bool g_quit = false;
-GLFWwindow* g_window = nullptr;
-
 ImFont* g_ui = nullptr;
 ImFont* g_mono = nullptr;
 
-// User preferences (theme + fonts), adjustable via File > Settings.
 struct Prefs {
   int theme = 0;      // 0 Dark, 1 Light, 2 Grey
   float font_size = 16.0f;
-  int ui_idx = 0;     // index into g_fonts
-  int mono_idx = 0;   // index into g_fonts
+  int ui_idx = 0;
+  int mono_idx = 0;
 };
 Prefs g_prefs;
-std::vector<std::pair<std::string, std::string>> g_fonts;  // {display name, path}
+std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
+bool g_show_document = false;  // container-inspector panel
 
-// Panel visibility (toggled from the View menu; the panels' own [x] closes them).
-bool g_show_editor = true;
-bool g_show_preview = true;
-bool g_show_document = false;  // container inspector - hidden by default
-
-fs::path g_workdir;
-bool g_workdir_is_temp = false;
-std::string g_archive_path;
-std::string g_last_dir;  // persisted last-visited dir for the file dialog
+bool g_quit = false;
+GLFWwindow* g_window = nullptr;
+std::string g_last_dir;
+fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
 enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage };
 OpenMode g_pending = OpenMode::None;
+
+bool is_dirty(const Document& d) {
+  return d.editor && d.editor->GetUndoIndex() != d.saved_undo;
+}
 
 // ---- preview image textures ----------------------------------------------------
 #ifndef GL_CLAMP_TO_EDGE
@@ -140,10 +144,9 @@ struct Tex {
 };
 std::unordered_map<std::string, Tex> g_tex_cache;
 
-// Load an image (relative to the working dir) as a GL texture, cached by path.
 const Tex* load_texture(const std::string& href) {
   fs::path p(href);
-  if (p.is_relative() && !g_workdir.empty()) p = g_workdir / p;
+  if (p.is_relative() && !g_render_workdir.empty()) p = g_render_workdir / p;
   const std::string key = p.string();
   if (auto it = g_tex_cache.find(key); it != g_tex_cache.end())
     return it->second.id ? &it->second : nullptr;
@@ -186,7 +189,7 @@ bool MarkdownView::get_image(image_info& nfo) const {
   return true;
 }
 
-// ---- assets --------------------------------------------------------------------
+// ---- assets + config -----------------------------------------------------------
 
 fs::path executable_path() {
 #if defined(_WIN32)
@@ -207,8 +210,6 @@ fs::path executable_path() {
 #endif
 }
 
-// assets/ next to the executable (deployed by CMake post-build); falls back to
-// the source assets dir (a compile-time define) so dev runs work too.
 std::string assets_dir() {
   std::error_code ec;
   const fs::path exe = executable_path();
@@ -223,11 +224,6 @@ std::string assets_dir() {
 #endif
 }
 
-// ---- persisted UI state (config dir) ------------------------------------------
-
-// Per-user config dir: %APPDATA%\MCDF Studio on Windows, $XDG_CONFIG_HOME or
-// ~/.config/mcdf-studio elsewhere. Holds the imgui layout, window geometry, and
-// file-dialog bookmarks so they survive across runs.
 fs::path config_dir() {
 #if defined(_WIN32)
   const char* base = std::getenv("APPDATA");
@@ -249,13 +245,9 @@ fs::path config_dir() {
 struct WinGeom {
   int w = 1280, h = 800, x = -1, y = -1;
 };
-
 WinGeom g_win_geom;
-std::string g_saved_ui_font, g_saved_mono_font;  // resolved to indices after scan_fonts
+std::string g_saved_ui_font, g_saved_mono_font;
 
-// Editor preferences: theme, fonts, window geometry, and file-dialog bookmarks.
-// This is a separate concern from ImGui's own window-layout ini (imgui.ini),
-// which ImGui manages itself - we only point it at a stable path.
 void load_preferences() {
   std::ifstream f((config_dir() / "preferences.ini").string());
   if (!f) return;
@@ -307,20 +299,8 @@ void save_preferences(GLFWwindow* w) {
   for (const auto& b : g_dialog.Bookmarks()) f << "bookmark=" << b << '\n';
 }
 
-// After scan_fonts(): map the saved font names back to combo indices.
-void resolve_saved_fonts() {
-  for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i) {
-    if (!g_saved_ui_font.empty() && g_fonts[i].first == g_saved_ui_font)
-      g_prefs.ui_idx = i;
-    if (!g_saved_mono_font.empty() && g_fonts[i].first == g_saved_mono_font)
-      g_prefs.mono_idx = i;
-  }
-}
-
 // ---- fonts + theme -------------------------------------------------------------
 
-// Discover the .ttf faces under assets/fonts (icon fonts excluded) and pick the
-// Roboto / RobotoMono defaults for the UI and editor.
 void scan_fonts() {
   g_fonts.clear();
   const std::string dir = assets_dir() + "/fonts";
@@ -329,7 +309,7 @@ void scan_fonts() {
     for (const auto& e : fs::directory_iterator(dir, ec)) {
       if (!e.is_regular_file() || e.path().extension() != ".ttf") continue;
       const std::string stem = e.path().stem().string();
-      if (stem.rfind("fa-", 0) == 0) continue;  // icon fonts aren't UI faces
+      if (stem.rfind("fa-", 0) == 0) continue;
       g_fonts.push_back({stem, e.path().string()});
     }
   }
@@ -341,9 +321,13 @@ void scan_fonts() {
   }
 }
 
-// (Re)build the font atlas from the current prefs. imgui 1.92 builds fonts
-// dynamically, so ClearFonts() + re-add is the supported mid-run font swap; the
-// user-facing size rides on FontScaleMain.
+void resolve_saved_fonts() {
+  for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i) {
+    if (!g_saved_ui_font.empty() && g_fonts[i].first == g_saved_ui_font) g_prefs.ui_idx = i;
+    if (!g_saved_mono_font.empty() && g_fonts[i].first == g_saved_mono_font) g_prefs.mono_idx = i;
+  }
+}
+
 void rebuild_fonts() {
   g_font_rebuild = false;
   ImGuiIO& io = ImGui::GetIO();
@@ -377,7 +361,6 @@ void rebuild_fonts() {
     g_ui = io.Fonts->AddFontDefault(&cfg);
   }
 
-  // Merge FontAwesome solid icons into the UI font (menus + status bar).
   if (fs::exists(fa, ec)) {
     ImFontConfig cfg;
     cfg.MergeMode = true;
@@ -387,35 +370,23 @@ void rebuild_fonts() {
     io.Fonts->AddFontFromFileTTF(fa.c_str(), kRef, &cfg, fa_ranges);
   }
 
-  // Monospace face for the code editor.
   g_mono = nullptr;
   if (!mono.empty() && fs::exists(mono, ec))
     g_mono = io.Fonts->AddFontFromFileTTF(mono.c_str(), kRef);
-  // Merge a broad-coverage monospace fallback (DejaVu Sans Mono) so glyphs the
-  // chosen editor face lacks - arrows, math, box drawing, dingbats - render
-  // instead of tofu boxes. Merge only fills glyphs the base font is missing.
   const std::string mono_fallback = fonts + "/DejaVuSansMono.ttf";
   if (g_mono && fs::exists(mono_fallback, ec)) {
     ImFontConfig cfg;
     cfg.MergeMode = true;
     cfg.PixelSnapH = true;
     static const ImWchar sym_ranges[] = {
-        0x2000, 0x206F,  // General Punctuation (dashes, bullets, ellipsis)
-        0x2190, 0x21FF,  // Arrows
-        0x2200, 0x22FF,  // Mathematical Operators
-        0x2500, 0x257F,  // Box Drawing
-        0x25A0, 0x25FF,  // Geometric Shapes
-        0x2600, 0x26FF,  // Miscellaneous Symbols
-        0x2700, 0x27BF,  // Dingbats
-        0,
+        0x2000, 0x206F, 0x2190, 0x21FF, 0x2200, 0x22FF,
+        0x2500, 0x257F, 0x25A0, 0x25FF, 0x2600, 0x26FF, 0x2700, 0x27BF, 0,
     };
     io.Fonts->AddFontFromFileTTF(mono_fallback.c_str(), kRef, &cfg, sym_ranges);
   }
   if (!g_mono) g_mono = g_ui;
 }
 
-// Match the native window title bar to the theme (Windows draws it light by
-// default, which clashes with the dark client area). No-op off Windows.
 void set_native_dark_titlebar(bool dark) {
 #if defined(_WIN32)
   if (!g_window) return;
@@ -497,10 +468,10 @@ void apply_theme(int t) {
   s.TabRounding = 2.0f;
   s.ScrollbarRounding = 3.0f;
   s.GrabRounding = 2.0f;
-  set_native_dark_titlebar(t != 1);  // light title bar only for the Light theme
+  set_native_dark_titlebar(t != 1);
 }
 
-// ---- small filesystem helpers --------------------------------------------------
+// ---- filesystem helpers --------------------------------------------------------
 
 std::string read_file_bytes(const std::string& path, bool& ok) {
   std::ifstream in(path, std::ios::binary);
@@ -527,37 +498,29 @@ fs::path make_workdir() {
   return dir;
 }
 
-void cleanup_workdir() {
-  clear_texture_cache();  // preview textures reference the old working dir
-  if (g_workdir_is_temp && !g_workdir.empty()) {
-    std::error_code ec;
-    fs::remove_all(g_workdir, ec);
-  }
-  g_workdir.clear();
-  g_workdir_is_temp = false;
-  g_archive_path.clear();
+// ---- document operations -------------------------------------------------------
+
+Document* new_document() {
+  auto d = std::make_unique<Document>();
+  d->id = g_next_doc_id++;
+  d->editor = std::make_unique<TextEditor>();
+  d->editor->SetLanguage(TextEditor::Language::Markdown());
+  d->editor->SetPalette(TextEditor::GetDarkPalette());
+  Document* ptr = d.get();
+  g_documents.push_back(std::move(d));
+  g_active = ptr;
+  return ptr;
 }
 
-bool is_dirty() {
-  return g_editor && g_doc && g_editor->GetUndoIndex() != g_saved_undo;
-}
-
-// ---- open / save ---------------------------------------------------------------
-
-void load_from_workdir(const std::string& display_path, bool is_archive) {
-  OpenDoc d;
-  d.path = display_path;
-  d.is_archive = is_archive;
-
-  auto container = mcdf::open_container(g_workdir);
+// Read the container in d.workdir into d + the editor.
+void load_into(Document& d) {
+  auto container = mcdf::open_container(d.workdir);
   if (!container) {
     d.status = "open failed: " + container.error().message;
-    if (g_editor) g_editor->SetText("");
-    g_doc = std::move(d);
+    d.editor->SetText("");
     return;
   }
   mcdf::Container& c = **container;
-
   if (auto files = c.list()) d.files = *files;
 
   std::string content;
@@ -569,133 +532,129 @@ void load_from_workdir(const std::string& display_path, bool is_archive) {
       d.status = "read content.md failed: " + raw.error().message;
     }
   }
-
   if (auto doc = mcdf::load_document(c)) {
     if (doc->has_metadata) d.title = doc->metadata.title;
     if (doc->has_schema) d.doc_type = doc->schema.document_type;
     d.heading_count = static_cast<int>(doc->headings.size());
   }
-
-  if (g_editor) {
-    g_editor->SetText(content);
-    g_editor->SetReadOnlyEnabled(false);
-    g_saved_undo = g_editor->GetUndoIndex();
-  }
-
-  if (d.status.empty()) d.status = "opened " + display_path;
-  g_doc = std::move(d);
+  d.editor->SetText(content);
+  d.editor->SetReadOnlyEnabled(false);
+  d.saved_undo = d.editor->GetUndoIndex();
+  if (d.status.empty()) d.status = "opened " + d.path;
 }
 
-void open_archive(const std::string& mcdf_path) {
-  cleanup_workdir();
+// Point a document at a .mcdf file: unpack to a fresh temp working copy.
+void set_archive(Document& d, const std::string& path) {
+  std::error_code ec;
+  if (d.workdir_is_temp && !d.workdir.empty()) fs::remove_all(d.workdir, ec);
+  d.path = path;
+  d.is_archive = true;
+  d.archive_path = path;
+  d.files.clear();
+  d.has_content = false;
+  d.title.clear();
+  d.doc_type.clear();
+  d.heading_count = 0;
+  d.status.clear();
+
   bool ok = false;
-  const std::string bytes = read_file_bytes(mcdf_path, ok);
+  const std::string bytes = read_file_bytes(path, ok);
   if (!ok) {
-    OpenDoc d;
-    d.path = mcdf_path;
-    d.status = "cannot read " + mcdf_path;
-    g_doc = std::move(d);
+    d.workdir.clear();
+    d.workdir_is_temp = false;
+    d.status = "cannot read " + path;
+    d.editor->SetText("");
     return;
   }
   const fs::path work = make_workdir();
   if (auto un = mcdf::unpack_archive(bytes, work); !un) {
-    std::error_code ec;
     fs::remove_all(work, ec);
-    OpenDoc d;
-    d.path = mcdf_path;
+    d.workdir.clear();
+    d.workdir_is_temp = false;
     d.status = "unpack failed: " + un.error().message;
-    g_doc = std::move(d);
+    d.editor->SetText("");
     return;
   }
-  g_workdir = work;
-  g_workdir_is_temp = true;
-  g_archive_path = mcdf_path;
-  load_from_workdir(mcdf_path, /*is_archive=*/true);
+  d.workdir = work;
+  d.workdir_is_temp = true;
+  load_into(d);
+}
+
+void open_archive(const std::string& mcdf_path) {
+  set_archive(*new_document(), mcdf_path);
 }
 
 void open_folder(const std::string& dir_path) {
-  cleanup_workdir();
-  g_workdir = fs::path(dir_path);
-  g_workdir_is_temp = false;
-  g_archive_path.clear();
-  load_from_workdir(dir_path, /*is_archive=*/false);
+  Document* d = new_document();
+  d->path = dir_path;
+  d->is_archive = false;
+  d->workdir = fs::path(dir_path);
+  d->workdir_is_temp = false;
+  load_into(*d);
 }
 
-void save_document() {
-  if (!g_editor || !g_doc || g_workdir.empty()) return;
-
-  auto dir = mcdf::DirectoryContainer::open(g_workdir);
+// Write the editor text to content.md and keep the manifest in sync.
+bool flush_working_copy(Document& d) {
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
   if (!dir) {
-    g_doc->status = "save failed: " + dir.error().message;
-    return;
+    d.status = "save failed: " + dir.error().message;
+    return false;
   }
-
-  const std::string text = g_editor->GetText();
-  if (auto w = (*dir)->write("content.md", text); !w) {
-    g_doc->status = "save failed: " + w.error().message;
-    return;
+  if (auto w = (*dir)->write("content.md", d.editor->GetText()); !w) {
+    d.status = "save failed: " + w.error().message;
+    return false;
   }
-
-  // Keep integrity consistent: rebuild the manifest if the document carries one
-  // (invalidates any existing signatures by design; re-signing is a later step).
   if ((*dir)->contains("manifest.json")) {
-    if (auto container = mcdf::open_container(g_workdir)) {
-      if (auto m = mcdf::build_manifest(**container)) {
+    if (auto container = mcdf::open_container(d.workdir))
+      if (auto m = mcdf::build_manifest(**container))
         if (auto json = mcdf::manifest_to_canonical_json(*m))
           (void)(*dir)->write("manifest.json", *json);
-      }
-    }
   }
+  return true;
+}
 
-  // For a .mcdf document, re-pack the working copy back into the single file.
-  if (g_doc->is_archive && !g_archive_path.empty()) {
-    auto container = mcdf::open_container(g_workdir);
+void save(Document& d) {
+  if (!d.editor || d.workdir.empty()) return;
+  if (!flush_working_copy(d)) return;
+
+  if (d.is_archive && !d.archive_path.empty()) {
+    auto container = mcdf::open_container(d.workdir);
     if (!container) {
-      g_doc->status = "save failed: " + container.error().message;
+      d.status = "save failed: " + container.error().message;
       return;
     }
     auto archive = mcdf::pack_container(**container);
     if (!archive) {
-      g_doc->status = "save failed: " + archive.error().message;
+      d.status = "save failed: " + archive.error().message;
       return;
     }
-    if (!write_file_bytes(g_archive_path, *archive)) {
-      g_doc->status = "save failed: cannot write " + g_archive_path;
+    if (!write_file_bytes(d.archive_path, *archive)) {
+      d.status = "save failed: cannot write " + d.archive_path;
       return;
     }
-    g_doc->status =
-        "saved " + g_archive_path + " (" + std::to_string(archive->size()) + " bytes)";
+    d.status = "saved " + d.archive_path + " (" + std::to_string(archive->size()) + " bytes)";
   } else {
-    g_doc->status = "saved content.md";
+    d.status = "saved content.md";
   }
-
-  g_saved_undo = g_editor->GetUndoIndex();
+  d.saved_undo = d.editor->GetUndoIndex();
 }
 
-// ---- UI ------------------------------------------------------------------------
-
-// Save the current document to a chosen .mcdf path (leaving the original
-// untouched), then switch the editor to the new file.
-void save_as(std::string path) {
-  if (!g_editor || !g_doc || g_workdir.empty()) return;
+void save_as(Document& d, std::string path) {
+  if (!d.editor || d.workdir.empty()) return;
   if (path.size() < 5 || path.substr(path.size() - 5) != ".mcdf") path += ".mcdf";
 
-  // Build the archive from a throwaway copy so "Save As" never modifies the
-  // current working copy / source folder.
   std::error_code ec;
   const fs::path tmp = make_workdir();
-  fs::copy(g_workdir, tmp,
+  fs::copy(d.workdir, tmp,
            fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-
   if (auto dir = mcdf::DirectoryContainer::open(tmp)) {
-    (void)(*dir)->write("content.md", g_editor->GetText());
+    (void)(*dir)->write("content.md", d.editor->GetText());
     if ((*dir)->contains("manifest.json"))
       if (auto c = mcdf::open_container(tmp))
         if (auto m = mcdf::build_manifest(**c))
           if (auto j = mcdf::manifest_to_canonical_json(*m))
             (void)(*dir)->write("manifest.json", *j);
   }
-
   bool ok = false;
   if (auto c = mcdf::open_container(tmp))
     if (auto archive = mcdf::pack_container(**c))
@@ -703,19 +662,16 @@ void save_as(std::string path) {
   fs::remove_all(tmp, ec);
 
   if (!ok) {
-    g_doc->status = "save-as failed: " + path;
+    d.status = "save-as failed: " + path;
     return;
   }
-  open_archive(path);  // switch the document to the new .mcdf
+  set_archive(d, path);  // this document now points at the new .mcdf
 }
 
-// Copy an image into the document's assets/ and insert a Markdown reference at
-// the editor cursor. Alignment/size are set via the image title, e.g.
-// ![alt](assets/x.png "width=400 align=center").
-void insert_image(const std::string& src) {
-  if (!g_editor || !g_doc || g_workdir.empty()) return;
+void insert_image(Document& d, const std::string& src) {
+  if (!d.editor || d.workdir.empty()) return;
   std::error_code ec;
-  const fs::path assets = g_workdir / "assets";
+  const fs::path assets = d.workdir / "assets";
   fs::create_directories(assets, ec);
 
   const fs::path srcp(src);
@@ -732,14 +688,23 @@ void insert_image(const std::string& src) {
     dest = assets / (safe + "-" + std::to_string(i) + ext);
 
   fs::copy_file(srcp, dest, fs::copy_options::overwrite_existing, ec);
-  if (ec) { g_doc->status = "insert image failed: " + ec.message(); return; }
+  if (ec) { d.status = "insert image failed: " + ec.message(); return; }
 
   const std::string rel = "assets/" + dest.filename().string();
   const std::string md = "![" + stem + "](" + rel + ")";
-  const TextEditor::CursorPosition p = g_editor->GetMainCursorPosition();
-  g_editor->ReplaceSectionText(p.line, p.column, p.line, p.column, md);
-  g_doc->status = "inserted " + rel;
+  const TextEditor::CursorPosition p = d.editor->GetMainCursorPosition();
+  d.editor->ReplaceSectionText(p.line, p.column, p.line, p.column, md);
+  d.status = "inserted " + rel;
 }
+
+void close_document(Document& d) {
+  if (d.workdir_is_temp && !d.workdir.empty()) {
+    std::error_code ec;
+    fs::remove_all(d.workdir, ec);
+  }
+}
+
+// ---- dialogs -------------------------------------------------------------------
 
 void open_archive_dialog() {
   imfd::Config cfg;
@@ -751,12 +716,22 @@ void open_archive_dialog() {
   g_dialog.Open(cfg);
 }
 
+void open_folder_dialog() {
+  imfd::Config cfg;
+  cfg.title = "Open MCDF container folder";
+  cfg.mode = imfd::Mode::PickFolder;
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = OpenMode::Folder;
+  g_dialog.Open(cfg);
+}
+
 void open_save_as_dialog() {
-  if (!g_doc || !g_doc->has_content) return;
+  if (!g_active || !g_active->has_content) return;
+  g_target_doc = g_active;
   imfd::Config cfg;
   cfg.title = "Save MCDF document as";
   cfg.mode = imfd::Mode::SaveFile;
-  cfg.default_name = fs::path(g_doc->path).filename().string();
+  cfg.default_name = fs::path(g_active->path).filename().string();
   cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
   if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
   g_pending = OpenMode::SaveAs;
@@ -764,7 +739,8 @@ void open_save_as_dialog() {
 }
 
 void open_insert_image_dialog() {
-  if (!g_doc || !g_doc->has_content) return;
+  if (!g_active || !g_active->has_content) return;
+  g_target_doc = g_active;
   imfd::Config cfg;
   cfg.title = "Insert image";
   cfg.mode = imfd::Mode::OpenFile;
@@ -775,118 +751,7 @@ void open_insert_image_dialog() {
   g_dialog.Open(cfg);
 }
 
-void draw_menu_bar() {
-  if (!ImGui::BeginMenuBar()) return;
-  if (ImGui::BeginMenu("File")) {
-    if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Open .mcdf document...", "Ctrl+O"))
-      open_archive_dialog();
-    if (ImGui::MenuItem(ICON_FA_FOLDER "  Open unpacked folder...")) {
-      imfd::Config cfg;
-      cfg.title = "Open MCDF container folder";
-      cfg.mode = imfd::Mode::PickFolder;
-      if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
-      g_pending = OpenMode::Folder;
-      g_dialog.Open(cfg);
-    }
-    ImGui::Separator();
-    const bool can_save = g_doc && g_doc->has_content;
-    if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
-      save_document();
-    if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save As...", "Ctrl+Shift+S", false, can_save))
-      open_save_as_dialog();
-    ImGui::Separator();
-    if (ImGui::MenuItem(ICON_FA_GEAR "  Settings...", "Ctrl+,"))
-      g_show_settings = true;
-    ImGui::Separator();
-    if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET "  Quit", "Ctrl+Q"))
-      g_quit = true;
-    ImGui::EndMenu();
-  }
-  if (ImGui::BeginMenu("View")) {
-    ImGui::MenuItem(ICON_FA_PEN "  Editor", nullptr, &g_show_editor);
-    ImGui::MenuItem(ICON_FA_FILE_LINES "  Preview", nullptr, &g_show_preview);
-    ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Document", nullptr, &g_show_document);
-    ImGui::EndMenu();
-  }
-  if (ImGui::BeginMenu("Insert")) {
-    const bool can = g_doc && g_doc->has_content;
-    if (ImGui::MenuItem(ICON_FA_IMAGE "  Image...", nullptr, false, can))
-      open_insert_image_dialog();
-    ImGui::EndMenu();
-  }
-  ImGui::EndMenuBar();
-}
-
-void draw_host() {
-  const ImGuiViewport* vp = ImGui::GetMainViewport();
-  ImGui::SetNextWindowPos(vp->WorkPos);
-  ImGui::SetNextWindowSize(vp->WorkSize);
-  ImGui::SetNextWindowViewport(vp->ID);
-
-  const ImGuiWindowFlags flags =
-      ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
-      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
-
-  // A slightly taller menu bar: its height is fixed at Begin() from FramePadding.
-  const float def_pad_y = ImGui::GetStyle().FramePadding.y;
-  const float status_h = ImGui::GetFontSize() + def_pad_y * 2.0f +
-                         ImGui::GetStyle().WindowPadding.y * 2.0f;
-
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                      ImVec2(ImGui::GetStyle().FramePadding.x, def_pad_y + 4.0f));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-  ImGui::Begin("##StudioHost", nullptr, flags);
-  ImGui::PopStyleVar(3);  // rounding/border/window-padding; taller FramePadding stays
-
-  ImGui::DockSpace(ImGui::GetID("StudioDock"), ImVec2(0.0f, -status_h));
-  draw_menu_bar();
-  ImGui::PopStyleVar();  // taller FramePadding
-  ImGui::End();
-}
-
-void draw_status_bar() {
-  const ImGuiViewport* vp = ImGui::GetMainViewport();
-  const float h = ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f;
-  ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - h));
-  ImGui::SetNextWindowSize(ImVec2(vp->Size.x, h));
-
-  const ImGuiWindowFlags flags =
-      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
-      ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar;
-
-  ImGui::PushStyleColor(ImGuiCol_WindowBg,
-                        ImGui::GetStyle().Colors[ImGuiCol_MenuBarBg]);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
-  if (ImGui::Begin("##StatusBar", nullptr, flags)) {
-    if (!g_doc) {
-      ImGui::TextDisabled(ICON_FA_FILE "  No document open");
-    } else {
-      ImGui::TextColored(kAccent, ICON_FA_FILE_LINES);
-      ImGui::SameLine();
-      ImGui::Text("%s", g_doc->path.c_str());
-      if (is_dirty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(kDirty, ICON_FA_PEN " unsaved");
-      }
-      // Right side: document type / kind.
-      const std::string right =
-          (g_doc->doc_type.empty() ? std::string("document") : g_doc->doc_type) +
-          (g_doc->is_archive ? "  |  .mcdf" : "  |  folder");
-      const float tw = ImGui::CalcTextSize(right.c_str()).x;
-      ImGui::SameLine(ImGui::GetWindowWidth() - tw - 12.0f);
-      ImGui::TextDisabled("%s", right.c_str());
-    }
-  }
-  ImGui::End();
-  ImGui::PopStyleVar(2);
-  ImGui::PopStyleColor();
-}
+// ---- UI ------------------------------------------------------------------------
 
 void draw_settings() {
   if (g_show_settings) {
@@ -914,7 +779,7 @@ void draw_settings() {
     for (int i = 0; i < 3; ++i)
       if (ImGui::Selectable(themes[i], i == g_prefs.theme)) {
         g_prefs.theme = i;
-        apply_theme(i);  // live preview
+        apply_theme(i);
       }
     ImGui::EndCombo();
   }
@@ -928,7 +793,6 @@ void draw_settings() {
     g_prefs.font_size = 16.0f;
     ImGui::GetStyle().FontScaleMain = 1.0f;
   }
-
   ImGui::SetNextItemWidth(300.0f);
   if (ImGui::BeginCombo("UI font", g_fonts[g_prefs.ui_idx].first.c_str())) {
     for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i)
@@ -955,63 +819,186 @@ void draw_settings() {
   ImGui::EndPopup();
 }
 
-void draw_document_panel() {
-  if (!g_show_document) return;
-  if (ImGui::Begin(ICON_FA_CIRCLE_INFO "  Document", &g_show_document)) {
-    if (!g_doc) {
-      ImGui::TextUnformatted("No document open.");
-      ImGui::Spacing();
-      if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open .mcdf document..."))
-        open_archive_dialog();
-    } else {
-      ImGui::TextWrapped("File: %s", g_doc->path.c_str());
-      ImGui::TextDisabled(g_doc->is_archive ? "(.mcdf document)"
-                                            : "(unpacked folder)");
-      ImGui::TextWrapped("%s", g_doc->status.c_str());
-      ImGui::Separator();
-      if (!g_doc->title.empty()) ImGui::Text("Title: %s", g_doc->title.c_str());
-      if (!g_doc->doc_type.empty())
-        ImGui::Text("Type:  %s", g_doc->doc_type.c_str());
-      ImGui::Text("Headings: %d", g_doc->heading_count);
-      ImGui::Text("Members:  %d", static_cast<int>(g_doc->files.size()));
-      ImGui::Separator();
-      for (const auto& f : g_doc->files) ImGui::BulletText("%s", f.c_str());
-    }
+void draw_menu_bar() {
+  if (!ImGui::BeginMenuBar()) return;
+  if (ImGui::BeginMenu("File")) {
+    if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Open .mcdf document...", "Ctrl+O"))
+      open_archive_dialog();
+    if (ImGui::MenuItem(ICON_FA_FOLDER "  Open unpacked folder..."))
+      open_folder_dialog();
+    ImGui::Separator();
+    const bool can_save = g_active && g_active->has_content;
+    if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
+      save(*g_active);
+    if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save As...", "Ctrl+Shift+S", false, can_save))
+      open_save_as_dialog();
+    ImGui::Separator();
+    if (ImGui::MenuItem(ICON_FA_GEAR "  Settings...", "Ctrl+,"))
+      g_show_settings = true;
+    ImGui::Separator();
+    if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET "  Quit", "Ctrl+Q"))
+      g_quit = true;
+    ImGui::EndMenu();
   }
+  if (ImGui::BeginMenu("Insert")) {
+    const bool can = g_active && g_active->has_content;
+    if (ImGui::MenuItem(ICON_FA_IMAGE "  Image...", nullptr, false, can))
+      open_insert_image_dialog();
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("View")) {
+    ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Document info", nullptr, &g_show_document);
+    ImGui::EndMenu();
+  }
+  ImGui::EndMenuBar();
+}
+
+void draw_host() {
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->WorkPos);
+  ImGui::SetNextWindowSize(vp->WorkSize);
+  ImGui::SetNextWindowViewport(vp->ID);
+
+  const ImGuiWindowFlags flags =
+      ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
+      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+
+  const float def_pad_y = ImGui::GetStyle().FramePadding.y;
+  const float status_h = ImGui::GetFontSize() + def_pad_y * 2.0f +
+                         ImGui::GetStyle().WindowPadding.y * 2.0f;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                      ImVec2(ImGui::GetStyle().FramePadding.x, def_pad_y + 4.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::Begin("##StudioHost", nullptr, flags);
+  ImGui::PopStyleVar(3);
+
+  const ImGuiID dock_id = ImGui::GetID("StudioDock");
+  ImGui::DockSpace(dock_id, ImVec2(0.0f, -status_h));
+
+  if (g_documents.empty()) {
+    ImGui::SetCursorPos(ImVec2(vp->WorkSize.x * 0.5f - 130.0f, vp->WorkSize.y * 0.4f));
+    ImGui::TextDisabled(ICON_FA_FOLDER_OPEN "  Open a .mcdf document (File menu, Ctrl+O)");
+  }
+
+  draw_menu_bar();
+  ImGui::PopStyleVar();  // taller FramePadding
   ImGui::End();
 }
 
-void draw_editor_panel() {
-  if (!g_show_editor) return;
-  if (ImGui::Begin(ICON_FA_PEN "  Editor", &g_show_editor)) {
-    if (g_doc && g_doc->has_content && g_editor) {
+// One document = a dockable window with an editor | preview split.
+void draw_document_window(Document& d) {
+  const std::string name = d.path.empty() ? std::string("untitled")
+                                          : fs::path(d.path).filename().string();
+  const std::string label =
+      (is_dirty(d) ? name + " *" : name) + "###doc" + std::to_string(d.id);
+  ImGui::SetNextWindowSize(ImVec2(920, 640), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(label.c_str(), &d.open)) {
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) g_active = &d;
+
+    if (!d.has_content) {
+      ImGui::TextUnformatted("(no content.md)");
+    } else {
+      const ImVec2 avail = ImGui::GetContentRegionAvail();
+      const float splitter = 6.0f;
+      float left_w = std::clamp(d.split, 0.15f, 0.85f) * (avail.x - splitter);
+
+      ImGui::BeginChild("##editor", ImVec2(left_w, avail.y), ImGuiChildFlags_Borders);
       if (g_mono)
 #if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 19200
         ImGui::PushFont(g_mono, 0.0f);
 #else
         ImGui::PushFont(g_mono);
 #endif
-      g_editor->Render("##editor", ImGui::GetContentRegionAvail(), false);
+      d.editor->Render("##ed", ImGui::GetContentRegionAvail(), false);
       if (g_mono) ImGui::PopFont();
-    } else {
-      ImGui::TextUnformatted("(open a document with a content.md)");
+      ImGui::EndChild();
+
+      ImGui::SameLine(0.0f, 0.0f);
+      ImGui::InvisibleButton("##split", ImVec2(splitter, avail.y));
+      if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+      if (ImGui::IsItemActive() && avail.x > 1.0f)
+        d.split += ImGui::GetIO().MouseDelta.x / avail.x;
+      d.split = std::clamp(d.split, 0.15f, 0.85f);
+      ImGui::SameLine(0.0f, 0.0f);
+
+      ImGui::BeginChild("##preview", ImVec2(0.0f, avail.y), ImGuiChildFlags_Borders);
+      g_render_workdir = d.workdir;  // for image resolution in get_image
+      const std::string text = d.editor->GetText();
+      static MarkdownView md;
+      md.print(text.c_str(), text.c_str() + text.size());
+      ImGui::EndChild();
     }
   }
   ImGui::End();
 }
 
-void draw_preview_panel() {
-  if (!g_show_preview) return;
-  if (ImGui::Begin(ICON_FA_FILE_LINES "  Preview", &g_show_preview)) {
-    if (g_doc && g_doc->has_content && g_editor) {
-      const std::string text = g_editor->GetText();
-      static MarkdownView md;
-      md.print(text.c_str(), text.c_str() + text.size());
+void draw_inspector_panel() {
+  if (!g_show_document) return;
+  if (ImGui::Begin(ICON_FA_CIRCLE_INFO "  Document info", &g_show_document)) {
+    if (!g_active) {
+      ImGui::TextUnformatted("No document focused.");
     } else {
-      ImGui::TextUnformatted("(no preview)");
+      Document& d = *g_active;
+      ImGui::TextWrapped("File: %s", d.path.c_str());
+      ImGui::TextDisabled(d.is_archive ? "(.mcdf document)" : "(unpacked folder)");
+      ImGui::TextWrapped("%s", d.status.c_str());
+      ImGui::Separator();
+      if (!d.title.empty()) ImGui::Text("Title: %s", d.title.c_str());
+      if (!d.doc_type.empty()) ImGui::Text("Type:  %s", d.doc_type.c_str());
+      ImGui::Text("Headings: %d", d.heading_count);
+      ImGui::Text("Members:  %d", static_cast<int>(d.files.size()));
+      ImGui::Separator();
+      for (const auto& f : d.files) ImGui::BulletText("%s", f.c_str());
     }
   }
   ImGui::End();
+}
+
+void draw_status_bar() {
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  const float h = ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f;
+  ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - h));
+  ImGui::SetNextWindowSize(ImVec2(vp->Size.x, h));
+
+  const ImGuiWindowFlags flags =
+      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar;
+
+  ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                        ImGui::GetStyle().Colors[ImGuiCol_MenuBarBg]);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
+  if (ImGui::Begin("##StatusBar", nullptr, flags)) {
+    if (!g_active) {
+      ImGui::TextDisabled(ICON_FA_FILE "  %d document(s) open",
+                          static_cast<int>(g_documents.size()));
+    } else {
+      Document& d = *g_active;
+      ImGui::TextColored(kAccent, ICON_FA_FILE_LINES);
+      ImGui::SameLine();
+      ImGui::Text("%s", d.path.c_str());
+      if (is_dirty(d)) {
+        ImGui::SameLine();
+        ImGui::TextColored(kDirty, ICON_FA_PEN " unsaved");
+      }
+      const std::string right =
+          (d.doc_type.empty() ? std::string("document") : d.doc_type) +
+          (d.is_archive ? "  |  .mcdf" : "  |  folder");
+      const float tw = ImGui::CalcTextSize(right.c_str()).x;
+      ImGui::SameLine(ImGui::GetWindowWidth() - tw - 12.0f);
+      ImGui::TextDisabled("%s", right.c_str());
+    }
+  }
+  ImGui::End();
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
 }
 
 void handle_shortcuts() {
@@ -1019,7 +1006,7 @@ void handle_shortcuts() {
   if (!io.KeyCtrl) return;
   if (ImGui::IsKeyPressed(ImGuiKey_S)) {
     if (io.KeyShift) open_save_as_dialog();
-    else if (g_doc && g_doc->has_content) save_document();
+    else if (g_active && g_active->has_content) save(*g_active);
   }
   if (ImGui::IsKeyPressed(ImGuiKey_O)) open_archive_dialog();
   if (ImGui::IsKeyPressed(ImGuiKey_Q)) g_quit = true;
@@ -1036,10 +1023,8 @@ int main() {
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
-  load_preferences();  // theme, fonts, window geometry, dialog bookmarks
+  load_preferences();
 
-  // GL context hints. macOS only grants OpenGL 3.2+ Core, forward-compatible;
-  // Linux/Windows are happy with a 3.0 compatibility context.
 #if defined(__APPLE__)
   const char* glsl_version = "#version 150";
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -1069,21 +1054,15 @@ int main() {
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   static std::string ini_path = (config_dir() / "imgui.ini").string();
-  io.IniFilename = ini_path.c_str();  // stable layout persistence (not CWD-relative)
+  io.IniFilename = ini_path.c_str();
   ImGui::StyleColorsDark();
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
 
   scan_fonts();
-  resolve_saved_fonts();  // map saved font names -> combo indices
+  resolve_saved_fonts();
   rebuild_fonts();
   apply_theme(g_prefs.theme);
-
-  // Create the editor once the ImGui context exists; bind Markdown syntax.
-  g_editor = std::make_unique<TextEditor>();
-  g_editor->SetLanguage(TextEditor::Language::Markdown());
-  g_editor->SetPalette(TextEditor::GetDarkPalette());
-  g_editor->SetReadOnlyEnabled(true);
 
   while (!glfwWindowShouldClose(window) && !g_quit) {
     glfwPollEvents();
@@ -1095,21 +1074,38 @@ int main() {
 
     handle_shortcuts();
     draw_host();
+
     const imfd::Result dlg_res = g_dialog.Draw();
     if (dlg_res == imfd::Result::Picked) {
       const std::string picked = g_dialog.SelectedPath();
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
-      else if (g_pending == OpenMode::SaveAs) save_as(picked);
-      else if (g_pending == OpenMode::InsertImage) insert_image(picked);
+      else if (g_pending == OpenMode::SaveAs && g_target_doc) save_as(*g_target_doc, picked);
+      else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
       g_pending = OpenMode::None;
+      g_target_doc = nullptr;
+    } else if (dlg_res == imfd::Result::Cancelled) {
+      g_pending = OpenMode::None;
+      g_target_doc = nullptr;
     }
-    if (dlg_res != imfd::Result::None) save_preferences(g_window);  // persist bookmarks/last dir
-    draw_document_panel();
-    draw_editor_panel();
-    draw_preview_panel();
+    if (dlg_res != imfd::Result::None) save_preferences(g_window);
+
+    for (auto& d : g_documents) draw_document_window(*d);
+    draw_inspector_panel();
     draw_status_bar();
     draw_settings();
+
+    // Reap closed documents (remove + clean their temp working copies).
+    for (auto it = g_documents.begin(); it != g_documents.end();) {
+      if (!(*it)->open) {
+        if (g_active == it->get()) g_active = nullptr;
+        close_document(**it);
+        it = g_documents.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (!g_active && !g_documents.empty()) g_active = g_documents.back().get();
 
     ImGui::Render();
     int fb_w = 0, fb_h = 0;
@@ -1123,8 +1119,9 @@ int main() {
   }
 
   save_preferences(window);
-  cleanup_workdir();
-  g_editor.reset();
+  for (auto& d : g_documents) close_document(*d);
+  g_documents.clear();
+  clear_texture_cache();
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();
