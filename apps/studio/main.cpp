@@ -125,6 +125,7 @@ bool g_quit = false;
 GLFWwindow* g_window = nullptr;
 double g_last_input = 0.0;  // glfwGetTime() of the last user input (idle throttle)
 std::string g_last_dir;
+std::vector<std::string> g_recent;  // recently opened documents (most-recent first)
 fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
 enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage };
@@ -277,6 +278,8 @@ void load_preferences() {
       g_last_dir = v;
     } else if (k == "bookmark") {
       if (!v.empty()) bm.push_back(v);
+    } else if (k == "recent") {
+      if (!v.empty()) g_recent.push_back(v);
     }
   }
   g_prefs.font_size = std::clamp(g_prefs.font_size, 10.0f, 32.0f);
@@ -301,6 +304,7 @@ void save_preferences(GLFWwindow* w) {
   }
   f << "last_dir=" << g_dialog.LastDirectory() << '\n';
   for (const auto& b : g_dialog.Bookmarks()) f << "bookmark=" << b << '\n';
+  for (const auto& r : g_recent) f << "recent=" << r << '\n';
 }
 
 // ---- fonts + theme -------------------------------------------------------------
@@ -584,8 +588,16 @@ void set_archive(Document& d, const std::string& path) {
   load_into(d);
 }
 
+void add_recent(const std::string& path) {
+  if (path.empty()) return;
+  g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), path), g_recent.end());
+  g_recent.insert(g_recent.begin(), path);
+  if (g_recent.size() > 12) g_recent.resize(12);
+}
+
 void open_archive(const std::string& mcdf_path) {
   set_archive(*new_document(), mcdf_path);
+  add_recent(mcdf_path);
 }
 
 void open_folder(const std::string& dir_path) {
@@ -595,6 +607,14 @@ void open_folder(const std::string& dir_path) {
   d->workdir = fs::path(dir_path);
   d->workdir_is_temp = false;
   load_into(*d);
+  add_recent(dir_path);
+}
+
+// Reopen a path from the recent list (dispatch by directory vs .mcdf file).
+void open_path(const std::string& path) {
+  std::error_code ec;
+  if (fs::is_directory(path, ec)) open_folder(path);
+  else open_archive(path);
 }
 
 // Write the editor text to content.md and keep the manifest in sync.
@@ -833,11 +853,23 @@ void draw_settings() {
 
 void draw_menu_bar() {
   if (!ImGui::BeginMenuBar()) return;
+  std::string recent_to_open;
   if (ImGui::BeginMenu("File")) {
     if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Open .mcdf document...", "Ctrl+O"))
       open_archive_dialog();
     if (ImGui::MenuItem(ICON_FA_FOLDER "  Open unpacked folder..."))
       open_folder_dialog();
+    if (ImGui::BeginMenu(ICON_FA_CLOCK_ROTATE_LEFT "  Open Recent", !g_recent.empty())) {
+      std::error_code ec;
+      for (const auto& p : g_recent) {
+        ImGui::BeginDisabled(!fs::exists(p, ec));
+        if (ImGui::MenuItem(p.c_str())) recent_to_open = p;
+        ImGui::EndDisabled();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Clear recent")) g_recent.clear();
+      ImGui::EndMenu();
+    }
     ImGui::Separator();
     const bool can_save = g_active && g_active->has_content;
     if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
@@ -859,6 +891,7 @@ void draw_menu_bar() {
     ImGui::EndMenu();
   }
   ImGui::EndMenuBar();
+  if (!recent_to_open.empty()) open_path(recent_to_open);  // deferred (not mid-iteration)
 }
 
 void draw_host() {
