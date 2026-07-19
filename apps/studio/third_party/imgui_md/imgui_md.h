@@ -140,6 +140,7 @@ private:
 	static void line(ImColor c, bool under);
 
 	//table state
+	bool m_in_table = false;  // MCDF: rendering via ImGui::BeginTable
 	int m_table_next_column = 0;
 	ImVec2 m_table_last_pos;
 	std::vector<float> m_table_col_pos;

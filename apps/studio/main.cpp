@@ -13,6 +13,7 @@
 // The look (dark theme, Roboto UI + RobotoMono editor + FontAwesome icons,
 // docked host + status bar) is adapted from the YMOVE studio shell.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -22,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "imgui.h"
@@ -83,6 +85,18 @@ bool g_quit = false;
 ImFont* g_ui = nullptr;
 ImFont* g_mono = nullptr;
 
+// User preferences (theme + fonts), adjustable via File > Settings.
+struct Prefs {
+  int theme = 0;      // 0 Dark, 1 Light, 2 Grey
+  float font_size = 16.0f;
+  int ui_idx = 0;     // index into g_fonts
+  int mono_idx = 0;   // index into g_fonts
+};
+Prefs g_prefs;
+std::vector<std::pair<std::string, std::string>> g_fonts;  // {display name, path}
+bool g_font_rebuild = false;
+bool g_show_settings = false;
+
 fs::path g_workdir;
 bool g_workdir_is_temp = false;
 std::string g_archive_path;
@@ -129,28 +143,57 @@ std::string assets_dir() {
 
 // ---- fonts + theme -------------------------------------------------------------
 
-void load_fonts() {
+// Discover the .ttf faces under assets/fonts (icon fonts excluded) and pick the
+// Roboto / RobotoMono defaults for the UI and editor.
+void scan_fonts() {
+  g_fonts.clear();
+  const std::string dir = assets_dir() + "/fonts";
+  std::error_code ec;
+  if (fs::exists(dir, ec)) {
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+      if (!e.is_regular_file() || e.path().extension() != ".ttf") continue;
+      const std::string stem = e.path().stem().string();
+      if (stem.rfind("fa-", 0) == 0) continue;  // icon fonts aren't UI faces
+      g_fonts.push_back({stem, e.path().string()});
+    }
+  }
+  std::sort(g_fonts.begin(), g_fonts.end());
+  if (g_fonts.empty()) g_fonts.push_back({"Default", ""});
+  for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i) {
+    if (g_fonts[i].first == "Roboto-Regular") g_prefs.ui_idx = i;
+    if (g_fonts[i].first == "RobotoMono-Regular") g_prefs.mono_idx = i;
+  }
+}
+
+// (Re)build the font atlas from the current prefs. imgui 1.92 builds fonts
+// dynamically, so ClearFonts() + re-add is the supported mid-run font swap; the
+// user-facing size rides on FontScaleMain.
+void rebuild_fonts() {
+  g_font_rebuild = false;
   ImGuiIO& io = ImGui::GetIO();
   ImGuiStyle& style = ImGui::GetStyle();
   constexpr float kRef = 16.0f;
-  style.FontSizeBase = kRef;    // imgui 1.92: reference rasterization size
-  style.FontScaleMain = 1.0f;   // on-screen scale (the user-facing size lever)
+  style.FontSizeBase = kRef;
+  style.FontScaleMain = g_prefs.font_size / kRef;
 
+  const auto path_of = [](int idx) -> std::string {
+    return (idx >= 0 && idx < static_cast<int>(g_fonts.size())) ? g_fonts[idx].second
+                                                                : std::string();
+  };
   const std::string fonts = assets_dir() + "/fonts";
-  const std::string ui = fonts + "/Roboto-Regular.ttf";
-  const std::string mono = fonts + "/RobotoMono-Regular.ttf";
+  const std::string ui = path_of(g_prefs.ui_idx);
+  const std::string mono = path_of(g_prefs.mono_idx);
   const std::string fa = fonts + "/fa-solid-900.ttf";
   std::error_code ec;
 
+  io.Fonts->ClearFonts();
+
   static const ImWchar ui_ranges[] = {
-      0x0020, 0x00FF,  // Basic Latin + Latin-1
-      0x0100, 0x024F,  // Latin Extended-A/B
-      0x0370, 0x03FF,  // Greek
-      0x2000, 0x206F,  // General Punctuation (em-dash, bullets)
-      0x20A0, 0x20CF,  // Currency
-      0,
+      0x0020, 0x00FF, 0x0100, 0x024F, 0x0370, 0x03FF,
+      0x2000, 0x206F, 0x20A0, 0x20CF, 0,
   };
-  if (fs::exists(ui, ec))
+  g_ui = nullptr;
+  if (!ui.empty() && fs::exists(ui, ec))
     g_ui = io.Fonts->AddFontFromFileTTF(ui.c_str(), kRef, nullptr, ui_ranges);
   if (!g_ui) {
     ImFontConfig cfg;
@@ -163,18 +206,19 @@ void load_fonts() {
     ImFontConfig cfg;
     cfg.MergeMode = true;
     cfg.PixelSnapH = true;
-    cfg.GlyphMinAdvanceX = kRef;  // keep icons monospaced
+    cfg.GlyphMinAdvanceX = kRef;
     static const ImWchar fa_ranges[] = {ICON_MIN_FA, ICON_MAX_FA, 0};
     io.Fonts->AddFontFromFileTTF(fa.c_str(), kRef, &cfg, fa_ranges);
   }
 
   // Monospace face for the code editor.
-  if (fs::exists(mono, ec))
+  g_mono = nullptr;
+  if (!mono.empty() && fs::exists(mono, ec))
     g_mono = io.Fonts->AddFontFromFileTTF(mono.c_str(), kRef);
   if (!g_mono) g_mono = g_ui;
 }
 
-void apply_theme() {
+void apply_theme_dark() {
   ImGui::StyleColorsDark();
   ImVec4* c = ImGui::GetStyle().Colors;
   c[ImGuiCol_Text]              = ImVec4(0.81f, 0.83f, 0.88f, 1.00f);
@@ -208,7 +252,36 @@ void apply_theme() {
   c[ImGuiCol_TableBorderStrong] = ImVec4(0.16f, 0.21f, 0.28f, 1.00f);
   c[ImGuiCol_TableBorderLight]  = ImVec4(0.16f, 0.21f, 0.28f, 0.50f);
   c[ImGuiCol_TableRowBgAlt]     = ImVec4(1.00f, 1.00f, 1.00f, 0.04f);
+}
 
+void apply_theme_grey() {
+  ImGui::StyleColorsDark();
+  ImVec4* c = ImGui::GetStyle().Colors;
+  c[ImGuiCol_Text]           = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);
+  c[ImGuiCol_TextDisabled]   = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+  c[ImGuiCol_WindowBg]       = ImVec4(0.13f, 0.13f, 0.13f, 1.00f);
+  c[ImGuiCol_PopupBg]        = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
+  c[ImGuiCol_MenuBarBg]      = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
+  c[ImGuiCol_Border]         = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+  c[ImGuiCol_FrameBg]        = ImVec4(0.20f, 0.20f, 0.20f, 0.50f);
+  c[ImGuiCol_FrameBgHovered] = ImVec4(0.40f, 0.40f, 0.40f, 0.40f);
+  c[ImGuiCol_FrameBgActive]  = ImVec4(0.55f, 0.55f, 0.55f, 0.70f);
+  c[ImGuiCol_TitleBgActive]  = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
+  c[ImGuiCol_CheckMark]      = ImVec4(0.75f, 0.75f, 0.75f, 1.00f);
+  c[ImGuiCol_Button]         = ImVec4(0.28f, 0.28f, 0.28f, 0.50f);
+  c[ImGuiCol_ButtonHovered]  = ImVec4(0.38f, 0.38f, 0.38f, 1.00f);
+  c[ImGuiCol_ButtonActive]   = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
+  c[ImGuiCol_Header]         = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
+  c[ImGuiCol_HeaderHovered]  = ImVec4(0.38f, 0.38f, 0.38f, 0.40f);
+  c[ImGuiCol_HeaderActive]   = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
+  c[ImGuiCol_Tab]            = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+  c[ImGuiCol_TabActive]      = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+}
+
+void apply_theme(int t) {
+  if (t == 1) ImGui::StyleColorsLight();
+  else if (t == 2) apply_theme_grey();
+  else apply_theme_dark();
   ImGuiStyle& s = ImGui::GetStyle();
   s.WindowRounding = 4.0f;
   s.FrameRounding = 2.0f;
@@ -416,6 +489,9 @@ void draw_menu_bar() {
     if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
       save_document();
     ImGui::Separator();
+    if (ImGui::MenuItem(ICON_FA_GEAR "  Settings...", "Ctrl+,"))
+      g_show_settings = true;
+    ImGui::Separator();
     if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET "  Quit", "Ctrl+Q"))
       g_quit = true;
     ImGui::EndMenu();
@@ -494,6 +570,73 @@ void draw_status_bar() {
   ImGui::PopStyleColor();
 }
 
+void draw_settings() {
+  if (g_show_settings) {
+    ImGui::OpenPopup("Settings");
+    g_show_settings = false;
+  }
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Appearing);
+
+  bool open = true;
+  if (!ImGui::BeginPopupModal("Settings", &open, ImGuiWindowFlags_AlwaysAutoResize))
+    return;
+
+  const auto section = [](const char* label) {
+    ImGui::Spacing();
+    ImGui::SeparatorText(label);
+    ImGui::Spacing();
+  };
+
+  section("Appearance");
+  const char* themes[] = {"Dark", "Light", "Grey"};
+  ImGui::SetNextItemWidth(200.0f);
+  if (ImGui::BeginCombo("Theme", themes[g_prefs.theme])) {
+    for (int i = 0; i < 3; ++i)
+      if (ImGui::Selectable(themes[i], i == g_prefs.theme)) {
+        g_prefs.theme = i;
+        apply_theme(i);  // live preview
+      }
+    ImGui::EndCombo();
+  }
+
+  section("Font");
+  ImGui::SetNextItemWidth(200.0f);
+  if (ImGui::SliderFloat("Size", &g_prefs.font_size, 10.0f, 32.0f, "%.0f px"))
+    ImGui::GetStyle().FontScaleMain = g_prefs.font_size / 16.0f;
+  ImGui::SameLine();
+  if (ImGui::Button("Reset")) {
+    g_prefs.font_size = 16.0f;
+    ImGui::GetStyle().FontScaleMain = 1.0f;
+  }
+
+  ImGui::SetNextItemWidth(300.0f);
+  if (ImGui::BeginCombo("UI font", g_fonts[g_prefs.ui_idx].first.c_str())) {
+    for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i)
+      if (ImGui::Selectable(g_fonts[i].first.c_str(), i == g_prefs.ui_idx)) {
+        g_prefs.ui_idx = i;
+        g_font_rebuild = true;
+      }
+    ImGui::EndCombo();
+  }
+  ImGui::SetNextItemWidth(300.0f);
+  if (ImGui::BeginCombo("Editor font", g_fonts[g_prefs.mono_idx].first.c_str())) {
+    for (int i = 0; i < static_cast<int>(g_fonts.size()); ++i)
+      if (ImGui::Selectable(g_fonts[i].first.c_str(), i == g_prefs.mono_idx)) {
+        g_prefs.mono_idx = i;
+        g_font_rebuild = true;
+      }
+    ImGui::EndCombo();
+  }
+  ImGui::TextDisabled("Editor font applies to the content.md pane (use a monospace face).");
+
+  ImGui::Spacing();
+  ImGui::Separator();
+  if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+  ImGui::EndPopup();
+}
+
 void draw_document_panel() {
   if (ImGui::Begin("Document")) {
     if (!g_doc) {
@@ -556,6 +699,7 @@ void handle_shortcuts() {
   if (ImGui::IsKeyPressed(ImGuiKey_S) && g_doc && g_doc->has_content) save_document();
   if (ImGui::IsKeyPressed(ImGuiKey_O)) open_archive_dialog();
   if (ImGui::IsKeyPressed(ImGuiKey_Q)) g_quit = true;
+  if (ImGui::IsKeyPressed(ImGuiKey_Comma)) g_show_settings = true;
 }
 
 void glfw_error_callback(int error, const char* description) {
@@ -599,8 +743,9 @@ int main() {
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
 
-  apply_theme();
-  load_fonts();
+  scan_fonts();
+  rebuild_fonts();
+  apply_theme(g_prefs.theme);
 
   // Create the editor once the ImGui context exists; bind Markdown syntax.
   g_editor = std::make_unique<TextEditor>();
@@ -610,6 +755,7 @@ int main() {
 
   while (!glfwWindowShouldClose(window) && !g_quit) {
     glfwPollEvents();
+    if (g_font_rebuild) rebuild_fonts();
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -627,6 +773,7 @@ int main() {
     draw_editor_panel();
     draw_preview_panel();
     draw_status_bar();
+    draw_settings();
 
     ImGui::Render();
     int fb_w = 0, fb_h = 0;
