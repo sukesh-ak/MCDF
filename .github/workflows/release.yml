@@ -159,21 +159,28 @@ jobs:
           set -eu
           name="mcdf-studio-${{ matrix.name }}"
           mkdir -p "dist/$name"
+
+          # Locate the binary wherever the generator placed it (Release/ on the
+          # VS generator, alongside build/ on Make/Ninja).
+          bin=$(find build/apps/studio -maxdepth 2 -type f \
+                  \( -name mcdf-studio -o -name mcdf-studio.exe \) | head -1)
+          if [ -z "$bin" ]; then echo "::error::studio binary not found"; exit 1; fi
+          bindir=$(dirname "$bin")
+          cp "$bin" "dist/$name/"
+
+          # Fonts/assets are deployed next to the binary post-build.
+          cp -r "$bindir/assets" "dist/$name/"
+
+          # Windows uses the dynamic triplet: bundle the app-local DLLs.
           if [ "${{ runner.os }}" = "Windows" ]; then
-            # Default (dynamic) triplet: the exe, its app-local DLLs and the fonts
-            # all land next to the binary in Release/.
-            cp build/apps/studio/Release/mcdf-studio.exe "dist/$name/"
-            cp build/apps/studio/Release/*.dll "dist/$name/" 2>/dev/null || true
-            cp -r build/apps/studio/Release/assets "dist/$name/"
-          else
-            cp build/apps/studio/mcdf-studio "dist/$name/"
-            cp -r build/apps/studio/assets "dist/$name/"
+            cp "$bindir"/*.dll "dist/$name/" 2>/dev/null || true
           fi
+
           cp README.md LICENSE NOTICE LICENSING.md "dist/$name/"
 
-          # Fail loudly if the binary or its fonts didn't get staged.
+          # Fail loudly if the binary or its fonts (assets/fonts/*.ttf) are missing.
           ls "dist/$name"/mcdf-studio* >/dev/null
-          ls "dist/$name"/assets/*.ttf >/dev/null
+          ls "dist/$name"/assets/fonts/*.ttf >/dev/null
 
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
