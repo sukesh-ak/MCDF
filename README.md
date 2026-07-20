@@ -17,8 +17,11 @@ This repository holds the **specification** and the **primary C++ runtime**.
 
 ## Status
 
-Early development. The format is specified; the runtime is being built in phases
-(read/inspect → integrity → signing → packaging → encryption → audit → render).
+Actively developed. The C++ runtime implements the full document pipeline — the
+`mcdf` CLI can `inspect`, `verify`, `sign`, `pack`/`unpack`, `encrypt`/`decrypt`,
+`audit`, and `render` (to sanitized HTML + plain text). **MCDF Studio**, a native
+Dear ImGui desktop editor, ships alongside it. Remaining work is hardening —
+additional signature algorithms, fuzzing, and more export targets.
 
 ## Layout
 
@@ -26,9 +29,10 @@ Early development. The format is specified; the runtime is being built in phases
 spec/          the MCDF specification (CSL-1.0)
 conformance/   schemas, test vectors, error taxonomy, runner
 include/mcdf/  public library headers
-src/           libmcdf implementation (the engine)
+src/           libmcdf implementation (container, crypto, model, serialize, core)
 apps/          clients built on libmcdf
   cli/           the `mcdf` command-line client
+  studio/        MCDF Studio — the Dear ImGui desktop editor
 tests/         unit / determinism / conformance tests
 ```
 
@@ -55,8 +59,13 @@ ctest --preset default      # run tests
 ./build/default/apps/cli/mcdf --version
 ```
 
-> To pin dependency versions reproducibly, run
-> `vcpkg x-update-baseline --add-initial-baseline` once and commit the result.
+**MCDF Studio** (the GUI editor) builds behind the optional `studio` feature,
+which pulls in Dear ImGui, GLFW and stb:
+
+```sh
+cmake --preset studio
+cmake --build --preset studio --target mcdf-studio
+```
 
 ### Docker (reproducible build, used for CI/CD)
 
@@ -74,9 +83,22 @@ flow above; Docker gives the hermetic environment CI/CD will reuse.
 
 ## Dependencies
 
-All third-party components are **MIT or Apache-2.0**: OpenSSL, nlohmann-json,
-yaml-cpp, md4c, spdlog, cxxopts, and doctest (tests only). New dependencies are
-added only after review.
+All third-party components are permissive (**MIT or Apache-2.0**), declared in
+[`vcpkg.json`](vcpkg.json); new ones are added only after review. Runtime + CLI:
+
+- **OpenSSL** (Apache-2.0) — SHA-256, Ed25519 / ECDSA signing, encryption
+- **nlohmann-json** (MIT) — `manifest.json` and other JSON
+- **yaml-cpp** (MIT) — `schema.yaml` / `metadata.yaml`
+- **md4c** (MIT) — CommonMark (Markdown) parsing
+- **spdlog** (MIT) — logging
+- **cxxopts** (MIT) — CLI argument parsing
+- **doctest** (MIT) — unit tests (test builds only)
+
+MCDF Studio, the optional GUI editor (`apps/studio`, `studio` feature), adds:
+
+- **Dear ImGui** (MIT) — GUI toolkit (docking + GLFW/OpenGL3 backends)
+- **GLFW** (zlib) — window and input
+- **stb_image** (MIT / public domain) — decode images for the live preview
 
 ## Licensing
 
@@ -84,5 +106,23 @@ Dual-licensed by content type — see [`LICENSING.md`](LICENSING.md):
 
 - **Specification** (`spec/`): Community Specification License 1.0.
 - **Code** (everything else): Apache License 2.0.
+
+## Attribution
+
+MCDF Studio (the GUI editor) bundles these third-party components, each under its
+own license and kept intact in-tree:
+
+- **imgui_md** — Dmitry Mekhontsev — MIT — live Markdown preview
+- **ImGuiColorTextEdit** — goossens fork — MIT — source-editor widget
+- **IconFontCppHeaders** (`IconsFontAwesome6.h`) — zlib — Font Awesome icon names
+
+Bundled fonts (shipped as assets, not linked code):
+
+- **Roboto** and **Roboto Mono** — Apache-2.0
+- **Font Awesome 6 Free** (Solid glyphs) — SIL OFL 1.1
+- **DejaVu Sans Mono** — DejaVu Fonts License (Bitstream Vera derivative)
+
+The `imfd` file dialog (`apps/studio/include/imfiledialog/`) is first-party MCDF
+code (Apache-2.0). Thanks to all the upstream authors.
 
 Copyright © 2026 The MCDF Project.
