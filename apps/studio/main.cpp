@@ -683,6 +683,31 @@ void open_path(const std::string& path) {
   else open_archive(path);
 }
 
+// Create a new, empty document backed by a temporary working copy. It stays
+// "untitled" (no path) until the first Save, which opens the Save As dialog.
+void new_blank_document() {
+  Document* d = new_document();
+  const fs::path work = make_workdir();
+  if (auto dir = mcdf::DirectoryContainer::open(work))
+    (void)(*dir)->write("content.md", "");
+  // Best-effort: seed a manifest so the first Save yields a well-formed .mcdf.
+  if (auto c = mcdf::open_container(work))
+    if (auto m = mcdf::build_manifest(**c))
+      if (auto j = mcdf::manifest_to_canonical_json(*m))
+        if (auto dir = mcdf::DirectoryContainer::open(work))
+          (void)(*dir)->write("manifest.json", *j);
+  d->workdir = work;
+  d->workdir_is_temp = true;
+  d->is_archive = false;
+  d->archive_path.clear();
+  d->path.clear();  // untitled
+  d->has_content = true;
+  d->editor->SetText("");
+  d->editor->SetReadOnlyEnabled(false);
+  d->saved_undo = d->editor->GetUndoIndex();
+  d->status = "new document - Save to choose a file";
+}
+
 // Write the editor text to content.md and keep the manifest in sync.
 bool flush_working_copy(Document& d) {
   auto dir = mcdf::DirectoryContainer::open(d.workdir);
@@ -703,8 +728,15 @@ bool flush_working_copy(Document& d) {
   return true;
 }
 
+void open_save_as_dialog();  // fwd: an untitled document's first Save opens it
+
 void save(Document& d) {
   if (!d.editor || d.workdir.empty()) return;
+  if (d.path.empty()) {  // untitled (new) document: first save chooses a file
+    g_active = &d;
+    open_save_as_dialog();
+    return;
+  }
   if (!flush_working_copy(d)) return;
 
   if (d.is_archive && !d.archive_path.empty()) {
@@ -821,7 +853,9 @@ void open_save_as_dialog() {
   imfd::Config cfg;
   cfg.title = "Save MCDF document as";
   cfg.mode = imfd::Mode::SaveFile;
-  cfg.default_name = fs::path(g_active->path).filename().string();
+  cfg.default_name = g_active->path.empty()
+                         ? "untitled.mcdf"
+                         : fs::path(g_active->path).filename().string();
   cfg.filters = {{"MCDF document", {".mcdf"}}, {"All files", {"*"}}};
   if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
   g_pending = OpenMode::SaveAs;
@@ -944,6 +978,8 @@ void draw_menu_bar() {
   if (!ImGui::BeginMenuBar()) return;
   std::string recent_to_open;
   if (ImGui::BeginMenu("File")) {
+    if (ImGui::MenuItem(ICON_FA_FILE_CIRCLE_PLUS "  New", "Ctrl+N"))
+      new_blank_document();
     if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Open .mcdf document...", "Ctrl+O"))
       open_archive_dialog();
     if (ImGui::MenuItem(ICON_FA_FOLDER "  Open unpacked folder..."))
@@ -1191,6 +1227,7 @@ void handle_shortcuts() {
     if (io.KeyShift) open_save_as_dialog();
     else if (g_active && g_active->has_content) save(*g_active);
   }
+  if (ImGui::IsKeyPressed(ImGuiKey_N)) new_blank_document();
   if (ImGui::IsKeyPressed(ImGuiKey_O)) open_archive_dialog();
   if (ImGui::IsKeyPressed(ImGuiKey_Q)) g_quit = true;
   if (ImGui::IsKeyPressed(ImGuiKey_Comma)) g_show_settings = true;
@@ -1291,7 +1328,10 @@ int main() {
       const std::string picked = g_dialog.SelectedPath();
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
-      else if (g_pending == OpenMode::SaveAs && g_target_doc) save_as(*g_target_doc, picked);
+      else if (g_pending == OpenMode::SaveAs && g_target_doc) {
+        save_as(*g_target_doc, picked);
+        add_recent(g_target_doc->path);
+      }
       else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
       else if (g_pending == OpenMode::Wallpaper) { g_prefs.wallpaper_path = picked; load_wallpaper(picked); }
       g_pending = OpenMode::None;
