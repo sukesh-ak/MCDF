@@ -6,7 +6,7 @@
 #include <mcdf/version.hpp>
 
 TEST_CASE("version string matches the declared version") {
-  CHECK(mcdf::version_string() == "0.2.0");
+  CHECK(mcdf::version_string() == "0.3.0");
   CHECK(mcdf::version_major == 0);
   CHECK(mcdf::version_minor == 1);
   CHECK(mcdf::version_patch == 0);
