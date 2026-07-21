@@ -94,6 +94,23 @@ struct Document {
   std::vector<int> outline_lines;      // 0-based editor line per outline entry (-1 unknown)
   std::size_t outline_undo = static_cast<std::size_t>(-1);  // undo index the cache was built at
 
+  // E3: manifest panel state. `manifest` is manifest.json as stored in the
+  // working copy; cur_hash overlays live (unsaved) member hashes on cached
+  // disk hashes so per-file dirty dots track the editor without re-hashing
+  // the whole container each frame.
+  mcdf::Manifest manifest;
+  bool has_manifest = false;
+  std::string container_hash;  // sha256 of manifest.json as stored
+  std::string verify_summary;  // last engine verify_manifest result
+  bool verify_ok = false;
+  int disk_rev = 0;   // bumped whenever the working copy changes on disk
+  int props_rev = 0;  // bumped on metadata/schema form edits
+  int mh_disk_rev = -1;  // disk_rev the disk hashes were computed at
+  int mh_props_rev = -1;
+  std::size_t mh_undo = static_cast<std::size_t>(-1);
+  std::unordered_map<std::string, std::string> cur_hash;  // member -> current hash
+  std::vector<std::string> extra_files;  // on disk but not listed in the manifest
+
   std::unique_ptr<TextEditor> editor;
   std::size_t saved_undo = 0;
   fs::path workdir;
@@ -136,10 +153,12 @@ std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
 
-// E2 panels (View menu): outline + schema binding, metadata form, schema form.
+// E2/E3 panels (View menu): outline + schema binding, metadata form, schema
+// form, manifest integrity table.
 bool g_show_structure = true;
 bool g_show_metadata = false;
 bool g_show_schema = false;
+bool g_show_manifest = true;
 
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
@@ -420,6 +439,8 @@ void load_preferences() {
       g_show_metadata = (v != "0");
     } else if (k == "panel_schema") {
       g_show_schema = (v != "0");
+    } else if (k == "panel_manifest") {
+      g_show_manifest = (v != "0");
     } else if (k == "wallpaper") {
       g_prefs.wallpaper_path = v;
     } else if (k == "wallpaper_opacity") {
@@ -450,6 +471,7 @@ void save_preferences(GLFWwindow* w) {
   f << "panel_structure=" << (g_show_structure ? 1 : 0) << '\n';
   f << "panel_metadata=" << (g_show_metadata ? 1 : 0) << '\n';
   f << "panel_schema=" << (g_show_schema ? 1 : 0) << '\n';
+  f << "panel_manifest=" << (g_show_manifest ? 1 : 0) << '\n';
   f << "wallpaper=" << g_prefs.wallpaper_path << '\n';
   f << "wallpaper_opacity=" << g_prefs.wallpaper_opacity << '\n';
   f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
@@ -678,6 +700,29 @@ Document* new_document() {
   return ptr;
 }
 
+// Re-read manifest.json from the working copy and invalidate the hash caches.
+void reload_manifest(Document& d) {
+  d.manifest = {};
+  d.has_manifest = false;
+  d.container_hash.clear();
+  d.cur_hash.clear();
+  d.extra_files.clear();
+  d.mh_disk_rev = d.mh_props_rev = -1;
+  d.mh_undo = static_cast<std::size_t>(-1);
+  ++d.disk_rev;
+  if (d.workdir.empty()) return;
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) return;
+  if (!(*c)->contains("manifest.json")) return;
+  if (auto raw = (*c)->read("manifest.json")) {
+    if (auto m = mcdf::parse_manifest_json(*raw)) {
+      d.manifest = *m;
+      d.has_manifest = true;
+      d.container_hash = mcdf::sha256_hex(*raw);
+    }
+  }
+}
+
 // Read the container in d.workdir into d + the editor.
 void load_into(Document& d) {
   auto container = mcdf::open_container(d.workdir);
@@ -718,6 +763,9 @@ void load_into(Document& d) {
   d.editor->SetReadOnlyEnabled(false);
   d.saved_undo = d.editor->GetUndoIndex();
   d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
+  d.verify_summary.clear();
+  d.verify_ok = false;
+  reload_manifest(d);
   if (d.status.empty()) d.status = "opened " + d.path;
 }
 
@@ -737,6 +785,16 @@ void set_archive(Document& d, const std::string& path) {
   d.schema = {};
   d.write_meta = d.write_schema = d.props_dirty = false;
   d.outline_undo = static_cast<std::size_t>(-1);
+  d.manifest = {};
+  d.has_manifest = false;
+  d.container_hash.clear();
+  d.verify_summary.clear();
+  d.verify_ok = false;
+  d.cur_hash.clear();
+  d.extra_files.clear();
+  d.mh_disk_rev = d.mh_props_rev = -1;
+  d.mh_undo = static_cast<std::size_t>(-1);
+  ++d.disk_rev;
   d.status.clear();
 
   bool ok = false;
@@ -818,8 +876,10 @@ void new_blank_document() {
 
 // Write the document's editable members (content.md, metadata.yaml,
 // schema.yaml) into a directory and keep its manifest in sync. YAML bytes come
-// from libmcdf's writers so Studio and the CLI emit identical members.
-bool write_members(Document& d, const fs::path& where, std::string& err) {
+// from libmcdf's writers so Studio and the CLI emit identical members. With
+// ensure_manifest, manifest.json is created even when absent (Build manifest).
+bool write_members(Document& d, const fs::path& where, std::string& err,
+                   bool ensure_manifest = false) {
   auto dir = mcdf::DirectoryContainer::open(where);
   if (!dir) {
     err = dir.error().message;
@@ -841,7 +901,7 @@ bool write_members(Document& d, const fs::path& where, std::string& err) {
       return false;
     }
   }
-  if ((*dir)->contains("manifest.json")) {
+  if (ensure_manifest || (*dir)->contains("manifest.json")) {
     if (auto container = mcdf::open_container(where))
       if (auto m = mcdf::build_manifest(**container))
         if (auto json = mcdf::manifest_to_canonical_json(*m))
@@ -850,14 +910,60 @@ bool write_members(Document& d, const fs::path& where, std::string& err) {
   return true;
 }
 
-bool flush_working_copy(Document& d) {
+bool flush_working_copy(Document& d, bool ensure_manifest = false) {
   std::string err;
-  if (!write_members(d, d.workdir, err)) {
+  if (!write_members(d, d.workdir, err, ensure_manifest)) {
     d.status = "save failed: " + err;
     return false;
   }
   d.props_dirty = false;
+  reload_manifest(d);  // manifest.json was rewritten; refresh the panel state
   return true;
+}
+
+// Manifest panel actions. Rebuild writes the live members (editor buffer +
+// forms) to the working copy and rebuilds manifest.json there - it does NOT
+// repack an archive; Save still does that. In folder mode the flush *is* the
+// save, so the editor's saved state advances too.
+void rebuild_manifest(Document& d) {
+  if (!d.editor || d.workdir.empty()) return;
+  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
+  if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
+  d.verify_summary.clear();
+  d.status = d.is_archive ? "manifest rebuilt (Save to write the .mcdf)"
+                          : "manifest rebuilt";
+}
+
+// Engine-authoritative check of the working copy on disk (unsaved editor
+// edits are not included - that is what the live dots show).
+void run_verify(Document& d) {
+  d.verify_ok = false;
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) {
+    d.verify_summary = "verify failed: " + c.error().message;
+    return;
+  }
+  auto v = mcdf::verify_manifest(**c, d.manifest);
+  if (!v) {
+    d.verify_summary = "verify failed: " + v.error().message;
+    return;
+  }
+  if (v->ok) {
+    d.verify_ok = true;
+    d.verify_summary =
+        "OK - " + std::to_string(d.manifest.files.size()) + " file(s) match";
+  } else {
+    std::string s;
+    const auto part = [&s](std::size_t n, const char* what) {
+      if (!n) return;
+      if (!s.empty()) s += ", ";
+      s += std::to_string(n) + " " + what;
+    };
+    part(v->mismatched.size(), "mismatched");
+    part(v->missing.size(), "missing");
+    part(v->extra.size(), "unlisted");
+    d.verify_summary = "FAILED - " + s;
+  }
 }
 
 void open_save_as_dialog();  // fwd: an untitled document's first Save opens it
@@ -1145,6 +1251,7 @@ void draw_menu_bar() {
     ImGui::MenuItem(ICON_FA_LIST "  Structure", nullptr, &g_show_structure);
     ImGui::MenuItem(ICON_FA_TAGS "  Metadata", nullptr, &g_show_metadata);
     ImGui::MenuItem(ICON_FA_SITEMAP "  Schema", nullptr, &g_show_schema);
+    ImGui::MenuItem(ICON_FA_FINGERPRINT "  Manifest", nullptr, &g_show_manifest);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Insert")) {
@@ -1401,6 +1508,7 @@ void draw_metadata_panel() {
       if (ch) {
         d.write_meta = true;
         d.props_dirty = true;
+        ++d.props_rev;
         d.title = d.meta.title;  // keep the status bar in sync
       }
     }
@@ -1472,7 +1580,167 @@ void draw_schema_panel() {
       if (ch) {
         d.write_schema = true;
         d.props_dirty = true;
+        ++d.props_rev;
         d.doc_type = d.schema.document_type;  // keep the status bar in sync
+      }
+    }
+  }
+  ImGui::End();
+}
+
+// Refresh the per-member current-hash view. Disk members are hashed only when
+// the working copy changed (disk_rev); content.md re-hashes from the editor
+// buffer per edit and metadata/schema from the form models per form edit -
+// the "what changed -> what must be re-hashed" story, computed incrementally.
+void refresh_manifest_view(Document& d) {
+  if (!d.has_manifest || !d.editor) return;
+  const std::string alg =
+      d.manifest.hash_algorithm.empty() ? "sha256" : d.manifest.hash_algorithm;
+  if (d.mh_disk_rev != d.disk_rev) {
+    d.mh_disk_rev = d.disk_rev;
+    d.cur_hash.clear();
+    d.extra_files.clear();
+    d.mh_undo = static_cast<std::size_t>(-1);  // re-apply the live overlays
+    d.mh_props_rev = -1;
+    if (auto c = mcdf::open_container(d.workdir)) {
+      if (auto files = (*c)->list()) {
+        for (const auto& f : *files) {
+          if (mcdf::is_manifest_excluded(f)) continue;
+          if (auto raw = (*c)->read(f))
+            if (auto h = mcdf::hash_hex(alg, *raw)) d.cur_hash[f] = *h;
+          if (!d.manifest.files.contains(f)) d.extra_files.push_back(f);
+        }
+      }
+    }
+  }
+  if (const std::size_t undo = d.editor->GetUndoIndex(); undo != d.mh_undo) {
+    d.mh_undo = undo;
+    if (auto h = mcdf::hash_hex(alg, d.editor->GetText()))
+      d.cur_hash["content.md"] = *h;
+  }
+  if (d.mh_props_rev != d.props_rev) {
+    d.mh_props_rev = d.props_rev;
+    if (d.write_meta)
+      if (auto h = mcdf::hash_hex(alg, mcdf::metadata_to_yaml(d.meta)))
+        d.cur_hash["metadata.yaml"] = *h;
+    if (d.write_schema)
+      if (auto h = mcdf::hash_hex(alg, mcdf::schema_to_yaml(d.schema)))
+        d.cur_hash["schema.yaml"] = *h;
+  }
+}
+
+// The integrity showcase: file -> hash table with live dirty dots, container
+// hash, Rebuild (re-hash into the working copy) and Verify (engine check).
+void draw_manifest_panel() {
+  if (!g_show_manifest) return;
+  ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_FINGERPRINT "  Manifest###Manifest", &g_show_manifest)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else if (!dp->has_manifest) {
+      ImGui::TextDisabled("(no manifest.json in this container)");
+      ImGui::Spacing();
+      if (ImGui::Button(ICON_FA_FINGERPRINT "  Build manifest"))
+        rebuild_manifest(*dp);
+    } else {
+      Document& d = *dp;
+      refresh_manifest_view(d);
+
+      // Summary: algorithm, counts, container hash.
+      int modified = 0, missing = 0;
+      for (const auto& [path, hash] : d.manifest.files) {
+        const auto it = d.cur_hash.find(path);
+        if (it == d.cur_hash.end()) ++missing;
+        else if (it->second != hash) ++modified;
+      }
+      const int extra = static_cast<int>(d.extra_files.size());
+      ImGui::TextDisabled("%s  |  %d file(s)",
+                          d.manifest.hash_algorithm.c_str(),
+                          static_cast<int>(d.manifest.files.size()));
+      ImGui::SameLine();
+      if (modified == 0 && missing == 0 && extra == 0)
+        ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK "  in sync");
+      else {
+        std::string s;
+        if (modified) s += std::to_string(modified) + " modified";
+        if (missing) s += (s.empty() ? "" : ", ") + std::to_string(missing) + " missing";
+        if (extra) s += (s.empty() ? "" : ", ") + std::to_string(extra) + " unlisted";
+        ImGui::TextColored(kDirty, ICON_FA_CIRCLE " %s", s.c_str());
+      }
+      ImGui::TextDisabled(ICON_FA_HASHTAG "  container %.16s...",
+                          d.container_hash.c_str());
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("sha256(manifest.json) = %s\nClick to copy",
+                          d.container_hash.c_str());
+      if (ImGui::IsItemClicked())
+        ImGui::SetClipboardText(d.container_hash.c_str());
+
+      if (ImGui::Button(ICON_FA_ROTATE "  Rebuild")) rebuild_manifest(d);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Write the live members to the working copy and\n"
+                          "re-hash - only what changed goes back to green.");
+      ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_SHIELD_HALVED "  Verify")) run_verify(d);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Engine check (verify_manifest) of the working copy\n"
+                          "on disk. Unsaved edits are not on disk yet.");
+      if (!d.verify_summary.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(d.verify_ok ? kBound : kMissing, "%s",
+                           d.verify_summary.c_str());
+      }
+
+      ImGui::Spacing();
+      const ImGuiTableFlags tflags =
+          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+          ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+      if (ImGui::BeginTable("##manifest", 3, tflags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("##st", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 1.4f);
+        ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Hash", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 8.0f);
+        ImGui::TableHeadersRow();
+        for (const auto& [path, hash] : d.manifest.files) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          const auto it = d.cur_hash.find(path);
+          if (it == d.cur_hash.end()) {
+            ImGui::TextColored(kMissing, ICON_FA_CIRCLE_XMARK);
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("listed in the manifest but missing");
+          } else if (it->second != hash) {
+            ImGui::TextColored(kDirty, ICON_FA_CIRCLE);
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("modified - needs rebuild\nmanifest: %s\n"
+                                "current:  %s", hash.c_str(),
+                                it->second.c_str());
+          } else {
+            ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("hash matches");
+          }
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(path.c_str());
+          ImGui::TableNextColumn();
+          ImGui::TextDisabled("%.12s...", hash.c_str());
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\nClick to copy", hash.c_str());
+          if (ImGui::IsItemClicked()) ImGui::SetClipboardText(hash.c_str());
+        }
+        for (const auto& path : d.extra_files) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextColored(kAccent, ICON_FA_CIRCLE_PLUS);
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("on disk but not listed - Rebuild adds it");
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(path.c_str());
+          ImGui::TableNextColumn();
+          ImGui::TextDisabled("-");
+        }
+        ImGui::EndTable();
       }
     }
   }
@@ -1753,6 +2021,7 @@ int main() {
     draw_structure_panel();
     draw_metadata_panel();
     draw_schema_panel();
+    draw_manifest_panel();
     draw_status_bar();
     draw_settings();
 
