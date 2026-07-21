@@ -116,6 +116,23 @@ struct Document {
   std::vector<mcdf::SignatureCheck> sigs;
   int sig_disk_rev = -1;
 
+  // E6: encryption state. `policy` mirrors encryption/policy.yaml when
+  // present; staging lists feed encrypt_container.
+  std::optional<mcdf::EncryptionPolicy> policy;
+  bool content_encrypted = false;          // content.md is ciphertext on disk
+  std::vector<std::string> enc_recipients; // staged recipient DIDs
+  std::vector<std::string> enc_files{"content.md"};  // staged file selection
+
+  // E6: audit timeline + chain/checkpoint status, cached per disk state.
+  std::vector<mcdf::AuditEntry> audit;
+  mcdf::AuditVerification audit_chain;
+  mcdf::CheckpointResult audit_cp;
+  int audit_disk_rev = -1;
+
+  // E7: conformance reports (one per profile), cached per disk state.
+  std::vector<mcdf::ValidationReport> conf_reports;
+  int conf_disk_rev = -1;
+
   std::unique_ptr<TextEditor> editor;
   std::size_t saved_undo = 0;
   fs::path workdir;
@@ -158,13 +175,18 @@ std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
 
-// E2/E3/E4 panels (View menu): outline + schema binding, metadata form, schema
-// form, manifest integrity table, trust (sign/verify).
+// E2-E7 panels (View menu): outline + schema binding, metadata form, schema
+// form, manifest integrity table, trust (sign/verify), encryption, audit,
+// conformance, container.
 bool g_show_structure = true;
 bool g_show_metadata = false;
 bool g_show_schema = false;
 bool g_show_manifest = true;
 bool g_show_trust = true;
+bool g_show_encryption = false;
+bool g_show_audit = false;
+bool g_show_conformance = false;
+bool g_show_container = false;
 
 // E4: the signing keystore. PEM keys live in config_dir()/keys; external PEMs
 // can be loaded in place. App-level state - one selected key signs any document.
@@ -180,6 +202,16 @@ int g_key_idx = -1;
 std::string g_saved_key_path;      // from preferences: reselect on start
 std::string g_sig_name = "author"; // signatures/<name>.sig
 
+// E6: X25519 (HPKE) decryption keys, scanned from the same keystore dir.
+struct EncKeyEntry {
+  std::string name;
+  std::string path;
+  std::string did;  // did:key of the public half (the recipient id)
+  std::optional<mcdf::EncPrivateKey> key;
+};
+std::vector<EncKeyEntry> g_enc_keys;
+int g_enc_key_idx = -1;
+
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
 double g_last_input = 0.0;  // glfwGetTime() of the last user input (idle throttle)
@@ -187,7 +219,10 @@ std::string g_last_dir;
 std::vector<std::string> g_recent;  // recently opened documents (most-recent first)
 fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
-enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage, Wallpaper, LoadKey };
+enum class OpenMode {
+  None, Archive, Folder, SaveAs, InsertImage, Wallpaper, LoadKey,
+  ExportHtml, ExportText,
+};
 OpenMode g_pending = OpenMode::None;
 
 bool is_dirty(const Document& d) {
@@ -463,6 +498,14 @@ void load_preferences() {
       g_show_manifest = (v != "0");
     } else if (k == "panel_trust") {
       g_show_trust = (v != "0");
+    } else if (k == "panel_encryption") {
+      g_show_encryption = (v != "0");
+    } else if (k == "panel_audit") {
+      g_show_audit = (v != "0");
+    } else if (k == "panel_conformance") {
+      g_show_conformance = (v != "0");
+    } else if (k == "panel_container") {
+      g_show_container = (v != "0");
     } else if (k == "signing_key") {
       g_saved_key_path = v;
     } else if (k == "wallpaper") {
@@ -497,6 +540,10 @@ void save_preferences(GLFWwindow* w) {
   f << "panel_schema=" << (g_show_schema ? 1 : 0) << '\n';
   f << "panel_manifest=" << (g_show_manifest ? 1 : 0) << '\n';
   f << "panel_trust=" << (g_show_trust ? 1 : 0) << '\n';
+  f << "panel_encryption=" << (g_show_encryption ? 1 : 0) << '\n';
+  f << "panel_audit=" << (g_show_audit ? 1 : 0) << '\n';
+  f << "panel_conformance=" << (g_show_conformance ? 1 : 0) << '\n';
+  f << "panel_container=" << (g_show_container ? 1 : 0) << '\n';
   f << "signing_key="
     << (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size())
             ? g_keys[g_key_idx].path
@@ -725,8 +772,8 @@ fs::path keys_dir() {
   return dir;
 }
 
-// Loads a PEM as a signing key and adds it to the keystore list (deduped by
-// path). Non-signing PEMs (e.g. x25519 encryption keys) are skipped.
+// Loads a PEM and adds it to the right keystore list (deduped by path):
+// Ed25519/P-256 -> signing keys, X25519 -> HPKE decryption keys.
 bool add_key_from_file(const std::string& path, bool select) {
   for (int i = 0; i < static_cast<int>(g_keys.size()); ++i) {
     if (g_keys[i].path == path) {
@@ -734,19 +781,37 @@ bool add_key_from_file(const std::string& path, bool select) {
       return true;
     }
   }
+  for (int i = 0; i < static_cast<int>(g_enc_keys.size()); ++i) {
+    if (g_enc_keys[i].path == path) {
+      if (select) g_enc_key_idx = i;
+      return true;
+    }
+  }
   bool ok = false;
   const std::string pem = read_file_bytes(path, ok);
   if (!ok) return false;
-  auto key = mcdf::PrivateKey::from_pem(pem);
-  if (!key) return false;
-  const std::string alg = key->jws_algorithm();
-  if (alg.empty()) return false;
-  auto did = key->did_key();
-  if (!did) return false;
-  g_keys.push_back(
-      {fs::path(path).stem().string(), path, *did, alg, std::move(*key)});
-  if (select || g_key_idx < 0) g_key_idx = static_cast<int>(g_keys.size()) - 1;
-  return true;
+  if (auto key = mcdf::PrivateKey::from_pem(pem)) {
+    const std::string alg = key->jws_algorithm();
+    if (!alg.empty()) {
+      auto did = key->did_key();
+      if (!did) return false;
+      g_keys.push_back(
+          {fs::path(path).stem().string(), path, *did, alg, std::move(*key)});
+      if (select || g_key_idx < 0)
+        g_key_idx = static_cast<int>(g_keys.size()) - 1;
+      return true;
+    }
+  }
+  if (auto key = mcdf::EncPrivateKey::from_pem(pem)) {
+    auto did = key->did_key();
+    if (!did) return false;
+    g_enc_keys.push_back(
+        {fs::path(path).stem().string(), path, *did, std::move(*key)});
+    if (select || g_enc_key_idx < 0)
+      g_enc_key_idx = static_cast<int>(g_enc_keys.size()) - 1;
+    return true;
+  }
+  return false;
 }
 
 void scan_keys() {
@@ -758,19 +823,34 @@ void scan_keys() {
   if (!g_saved_key_path.empty()) add_key_from_file(g_saved_key_path, true);
 }
 
-// Generates an Ed25519 key into the keystore (key-<n>.pem) and selects it.
+// First free <prefix>-<n>.pem slot in the keystore.
+fs::path free_key_path(const char* prefix) {
+  std::error_code ec;
+  const fs::path dir = keys_dir();
+  for (int i = 1;; ++i) {
+    fs::path dest = dir / (std::string(prefix) + "-" + std::to_string(i) + ".pem");
+    if (!fs::exists(dest, ec)) return dest;
+  }
+}
+
+// Generates an Ed25519 signing key into the keystore (key-<n>.pem), selects it.
 void generate_signing_key() {
   auto key = mcdf::PrivateKey::generate_ed25519();
   if (!key) return;
   auto pem = key->to_pem();
   if (!pem) return;
-  std::error_code ec;
-  const fs::path dir = keys_dir();
-  fs::path dest;
-  for (int i = 1;; ++i) {
-    dest = dir / ("key-" + std::to_string(i) + ".pem");
-    if (!fs::exists(dest, ec)) break;
-  }
+  const fs::path dest = free_key_path("key");
+  if (!write_file_bytes(dest.string(), *pem)) return;
+  add_key_from_file(dest.string(), true);
+}
+
+// Generates an X25519 HPKE key into the keystore (enc-<n>.pem), selects it.
+void generate_enc_key() {
+  auto key = mcdf::EncPrivateKey::generate_x25519();
+  if (!key) return;
+  auto pem = key->to_pem();
+  if (!pem) return;
+  const fs::path dest = free_key_path("enc");
   if (!write_file_bytes(dest.string(), *pem)) return;
   add_key_from_file(dest.string(), true);
 }
@@ -802,6 +882,7 @@ void reload_manifest(Document& d) {
   if (d.workdir.empty()) return;
   auto c = mcdf::open_container(d.workdir);
   if (!c) return;
+  if (auto files = (*c)->list()) d.files = *files;  // keep member views fresh
   if (!(*c)->contains("manifest.json")) return;
   if (auto raw = (*c)->read("manifest.json")) {
     if (auto m = mcdf::parse_manifest_json(*raw)) {
@@ -848,8 +929,21 @@ void load_into(Document& d) {
     d.write_schema = doc->has_schema;
     d.heading_count = static_cast<int>(doc->headings.size());
   }
+  d.policy.reset();
+  d.content_encrypted = false;
+  d.enc_recipients.clear();
+  d.enc_files = {"content.md"};
+  if (c.contains("encryption/policy.yaml")) {
+    if (auto raw = c.read("encryption/policy.yaml"))
+      if (auto p = mcdf::parse_encryption_policy_yaml(*raw)) {
+        d.policy = *p;
+        for (const auto& f : p->encrypted_files)
+          if (f == "content.md") d.content_encrypted = true;
+      }
+  }
   d.editor->SetText(content);
-  d.editor->SetReadOnlyEnabled(false);
+  // Ciphertext is not editable - decrypt first (Encryption panel).
+  d.editor->SetReadOnlyEnabled(d.content_encrypted);
   d.saved_undo = d.editor->GetUndoIndex();
   d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
   d.verify_summary.clear();
@@ -886,6 +980,16 @@ void set_archive(Document& d, const std::string& path) {
   ++d.disk_rev;
   d.sigs.clear();
   d.sig_disk_rev = -1;
+  d.policy.reset();
+  d.content_encrypted = false;
+  d.enc_recipients.clear();
+  d.enc_files = {"content.md"};
+  d.audit.clear();
+  d.audit_chain = {};
+  d.audit_cp = {};
+  d.audit_disk_rev = -1;
+  d.conf_reports.clear();
+  d.conf_disk_rev = -1;
   d.status.clear();
 
   bool ok = false;
@@ -976,17 +1080,27 @@ bool write_members(Document& d, const fs::path& where, std::string& err,
     err = dir.error().message;
     return false;
   }
-  if (auto w = (*dir)->write("content.md", d.editor->GetText()); !w) {
-    err = w.error().message;
+  // Members encrypted at rest must never be overwritten from the (stale or
+  // ciphertext-holding) UI models - decrypt first.
+  const auto is_encrypted = [&d](std::string_view f) {
+    if (!d.policy) return false;
+    for (const auto& e : d.policy->encrypted_files)
+      if (e == f) return true;
     return false;
+  };
+  if (!is_encrypted("content.md")) {
+    if (auto w = (*dir)->write("content.md", d.editor->GetText()); !w) {
+      err = w.error().message;
+      return false;
+    }
   }
-  if (d.write_meta) {
+  if (d.write_meta && !is_encrypted("metadata.yaml")) {
     if (auto w = (*dir)->write("metadata.yaml", mcdf::metadata_to_yaml(d.meta)); !w) {
       err = w.error().message;
       return false;
     }
   }
-  if (d.write_schema) {
+  if (d.write_schema && !is_encrypted("schema.yaml")) {
     if (auto w = (*dir)->write("schema.yaml", mcdf::schema_to_yaml(d.schema)); !w) {
       err = w.error().message;
       return false;
@@ -1105,7 +1219,7 @@ void sign_document(Document& d) {
     d.status = "sign failed: " + w.error().message;
     return;
   }
-  ++d.disk_rev;  // new signature on disk -> re-verify
+  reload_manifest(d);  // new signature on disk -> refresh members + re-verify
   d.verify_summary.clear();
   d.status = "signed by " + k.did + " -> " + sig_path +
              (d.is_archive ? " (Save to write the .mcdf)" : "");
@@ -1118,7 +1232,7 @@ void remove_signature(Document& d, const std::string& file) {
     d.status = "remove failed: " + r.error().message;
     return;
   }
-  ++d.disk_rev;
+  reload_manifest(d);
   d.status = "removed " + file;
 }
 
@@ -1279,6 +1393,23 @@ void open_load_key_dialog() {
   g_dialog.Open(cfg);
 }
 
+void open_export_render_dialog(bool html) {
+  if (!g_active || !g_active->has_content) return;
+  g_target_doc = g_active;
+  imfd::Config cfg;
+  cfg.title = html ? "Export canonical HTML" : "Export canonical text";
+  cfg.mode = imfd::Mode::SaveFile;
+  const std::string stem = g_active->path.empty()
+                               ? std::string("untitled")
+                               : fs::path(g_active->path).stem().string();
+  cfg.default_name = stem + (html ? ".html" : ".txt");
+  if (html) cfg.filters = {{"HTML", {".html"}}, {"All files", {"*"}}};
+  else cfg.filters = {{"Text", {".txt"}}, {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = html ? OpenMode::ExportHtml : OpenMode::ExportText;
+  g_dialog.Open(cfg);
+}
+
 void open_wallpaper_dialog() {
   imfd::Config cfg;
   cfg.title = "Choose background image";
@@ -1419,6 +1550,12 @@ void draw_menu_bar() {
     ImGui::MenuItem(ICON_FA_SITEMAP "  Schema", nullptr, &g_show_schema);
     ImGui::MenuItem(ICON_FA_FINGERPRINT "  Manifest", nullptr, &g_show_manifest);
     ImGui::MenuItem(ICON_FA_SHIELD_HALVED "  Trust", nullptr, &g_show_trust);
+    ImGui::MenuItem(ICON_FA_LOCK "  Encryption", nullptr, &g_show_encryption);
+    ImGui::MenuItem(ICON_FA_TIMELINE "  Audit", nullptr, &g_show_audit);
+    ImGui::MenuItem(ICON_FA_LIST_CHECK "  Conformance", nullptr,
+                    &g_show_conformance);
+    ImGui::MenuItem(ICON_FA_BOX_ARCHIVE "  Container", nullptr,
+                    &g_show_container);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Insert")) {
@@ -1534,6 +1671,146 @@ void jump_to_heading(Document& d, std::size_t idx) {
 // The active document, or null if none has content (panels act on g_active).
 Document* panel_target() {
   return (g_active && g_active->has_content) ? g_active : nullptr;
+}
+
+// ---- E5-E7 operations ----------------------------------------------------------
+
+// Encrypt the staged files for the staged recipients (AES-256-GCM + HPKE),
+// then reload from disk: content becomes ciphertext and the editor locks.
+void encrypt_document(Document& d) {
+  if (d.enc_recipients.empty()) {
+    d.status = "encrypt: add at least one recipient DID";
+    return;
+  }
+  std::vector<mcdf::EncPublicKey> recipients;
+  for (const auto& did : d.enc_recipients) {
+    auto pk = mcdf::EncPublicKey::from_did_key(did);
+    if (!pk) {
+      d.status = "encrypt failed: " + pk.error().message;
+      return;
+    }
+    recipients.push_back(*pk);
+  }
+  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) {
+    d.status = "encrypt failed: " + dir.error().message;
+    return;
+  }
+  std::vector<std::string> files = d.enc_files;
+  if (files.empty()) files.push_back("content.md");
+  if (auto r = mcdf::encrypt_container(**dir, files, recipients); !r) {
+    d.status = "encrypt failed: " + r.error().message;
+    return;
+  }
+  const std::string note = d.is_archive ? " (Save to write the .mcdf)" : "";
+  load_into(d);  // re-read: ciphertext on disk, policy present, editor locked
+  d.status = "encrypted " + std::to_string(files.size()) + " file(s) for " +
+             std::to_string(recipients.size()) + " recipient(s)" + note;
+}
+
+// Decrypt with the selected X25519 key and reload (plaintext, editable again).
+void decrypt_document(Document& d) {
+  if (g_enc_key_idx < 0 || g_enc_key_idx >= static_cast<int>(g_enc_keys.size()))
+    return;
+  const EncKeyEntry& k = g_enc_keys[g_enc_key_idx];
+  if (!k.key) return;
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) {
+    d.status = "decrypt failed: " + dir.error().message;
+    return;
+  }
+  if (auto r = mcdf::decrypt_container(**dir, *k.key); !r) {
+    d.status = "decrypt failed: " + r.error().message;
+    return;
+  }
+  const std::string note = d.is_archive ? " (Save to write the .mcdf)" : "";
+  load_into(d);
+  d.status = "decrypted" + note;
+}
+
+// Audit timeline + chain/checkpoint status, re-read when the disk changed.
+void refresh_audit(Document& d) {
+  if (d.audit_disk_rev == d.disk_rev) return;
+  d.audit_disk_rev = d.disk_rev;
+  d.audit.clear();
+  d.audit_chain = {};
+  d.audit_cp = {};
+  if (d.workdir.empty()) return;
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) return;
+  if (auto e = mcdf::read_audit_log(**c)) d.audit = std::move(*e);
+  if (auto v = mcdf::audit_verify(**c)) d.audit_chain = *v;
+  if (auto cp = mcdf::audit_verify_checkpoint(**c)) d.audit_cp = *cp;
+}
+
+void audit_append_entry(Document& d, const std::string& action) {
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) return;
+  const std::string actor =
+      (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()))
+          ? g_keys[g_key_idx].did
+          : "mcdf-studio";
+  if (auto r = mcdf::audit_append(**dir, action, actor, iso8601_now_utc()); !r) {
+    d.status = "audit append failed: " + r.error().message;
+    return;
+  }
+  reload_manifest(d);
+  d.status = "audit: appended " + action;
+}
+
+void audit_make_checkpoint(Document& d) {
+  if (g_key_idx < 0 || g_key_idx >= static_cast<int>(g_keys.size())) return;
+  const SigningKey& k = g_keys[g_key_idx];
+  if (!k.key) return;
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) return;
+  if (auto r = mcdf::audit_checkpoint(**dir, *k.key, k.did); !r) {
+    d.status = "checkpoint failed: " + r.error().message;
+    return;
+  }
+  reload_manifest(d);
+  d.status = "audit checkpoint signed by " + k.did;
+}
+
+// Conformance reports over the working copy, one per profile.
+void refresh_conformance(Document& d) {
+  if (d.conf_disk_rev == d.disk_rev) return;
+  d.conf_disk_rev = d.disk_rev;
+  d.conf_reports.clear();
+  if (d.workdir.empty()) return;
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) return;
+  auto doc = mcdf::load_document(**c);
+  if (!doc) return;
+  using P = mcdf::Profile;
+  for (P p : {P::kCore, P::kIntegrity, P::kSigned, P::kEncrypted, P::kRender})
+    if (auto r = mcdf::validate(**c, *doc, p)) d.conf_reports.push_back(*r);
+}
+
+// Canonical, engine-produced render (deterministic; carries the provenance
+// stamp). The live preview is an approximation - this is what ships.
+void export_render(Document& d, mcdf::RenderFormat fmt, std::string path) {
+  if (!flush_working_copy(d)) return;  // render what the user sees
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) {
+    d.status = "render failed: " + c.error().message;
+    return;
+  }
+  auto out = mcdf::render(**c, fmt);
+  if (!out) {
+    d.status = "render failed: " + out.error().message;
+    return;
+  }
+  const std::string ext = fmt == mcdf::RenderFormat::kHtml ? ".html" : ".txt";
+  if (path.size() < ext.size() ||
+      path.compare(path.size() - ext.size(), ext.size(), ext) != 0)
+    path += ext;
+  if (!write_file_bytes(path, *out)) {
+    d.status = "render failed: cannot write " + path;
+    return;
+  }
+  d.status = "canonical render -> " + path;
 }
 
 // Outline of the live editor buffer + schema sections with their binding
@@ -2057,6 +2334,346 @@ void draw_trust_panel() {
   ImGui::End();
 }
 
+// Confidentiality: policy + recipients (HPKE), encrypt / decrypt in place.
+void draw_encryption_panel() {
+  if (!g_show_encryption) return;
+  ImGui::SetNextWindowSize(ImVec2(440, 470), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_LOCK "  Encryption###Encryption", &g_show_encryption)) {
+    ImGui::SeparatorText(ICON_FA_KEY "  My decryption key (X25519)");
+    const char* sel =
+        (g_enc_key_idx >= 0 && g_enc_key_idx < static_cast<int>(g_enc_keys.size()))
+            ? g_enc_keys[g_enc_key_idx].name.c_str()
+            : "(no key)";
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
+    if (ImGui::BeginCombo("##enckey", sel)) {
+      for (int i = 0; i < static_cast<int>(g_enc_keys.size()); ++i)
+        if (ImGui::Selectable(g_enc_keys[i].name.c_str(), i == g_enc_key_idx))
+          g_enc_key_idx = i;
+      ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_PLUS "  Generate")) generate_enc_key();
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Load PEM..."))
+      open_load_key_dialog();
+    if (g_enc_key_idx >= 0 && g_enc_key_idx < static_cast<int>(g_enc_keys.size())) {
+      const EncKeyEntry& k = g_enc_keys[g_enc_key_idx];
+      ImGui::TextDisabled(ICON_FA_FINGERPRINT "  %.32s...", k.did.c_str());
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\nThis DID is what others encrypt to.\nClick to copy",
+                          k.did.c_str());
+      if (ImGui::IsItemClicked()) ImGui::SetClipboardText(k.did.c_str());
+    }
+
+    ImGui::Spacing();
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else if (dp->policy) {
+      Document& d = *dp;
+      const mcdf::EncryptionPolicy& p = *d.policy;
+      ImGui::SeparatorText(ICON_FA_LOCK "  Encrypted");
+      ImGui::TextDisabled("%s  |  %s", p.method.c_str(), p.key_management.c_str());
+      for (const auto& f : p.encrypted_files)
+        ImGui::BulletText("%s", f.c_str());
+      ImGui::TextDisabled("Recipients:");
+      for (std::size_t i = 0; i < p.recipients.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::Bullet();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.40s...", p.recipients[i].id.c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("%s\nClick to copy", p.recipients[i].id.c_str());
+        if (ImGui::IsItemClicked())
+          ImGui::SetClipboardText(p.recipients[i].id.c_str());
+        ImGui::PopID();
+      }
+      ImGui::Spacing();
+      const bool can_dec =
+          g_enc_key_idx >= 0 &&
+          g_enc_key_idx < static_cast<int>(g_enc_keys.size()) &&
+          g_enc_keys[g_enc_key_idx].key.has_value();
+      ImGui::BeginDisabled(!can_dec);
+      if (ImGui::Button(ICON_FA_UNLOCK "  Decrypt")) decrypt_document(d);
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(can_dec ? "HPKE-unwrap the content key with the\n"
+                                    "selected X25519 key, decrypt in place."
+                                  : "Select or generate an X25519 key first.");
+    } else {
+      Document& d = *dp;
+      ImGui::SeparatorText(ICON_FA_LOCK_OPEN "  Not encrypted");
+      ImGui::TextDisabled("Files to encrypt:");
+      for (const auto& f : d.files) {
+        if (mcdf::is_manifest_excluded(f)) continue;
+        bool on = std::find(d.enc_files.begin(), d.enc_files.end(), f) !=
+                  d.enc_files.end();
+        if (ImGui::Checkbox(f.c_str(), &on)) {
+          if (on) d.enc_files.push_back(f);
+          else d.enc_files.erase(
+              std::remove(d.enc_files.begin(), d.enc_files.end(), f),
+              d.enc_files.end());
+        }
+      }
+      ImGui::Spacing();
+      ImGui::TextDisabled("Recipients (X25519 DIDs):");
+      int remove = -1;
+      for (std::size_t i = 0; i < d.enc_recipients.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        if (ImGui::SmallButton(ICON_FA_TRASH)) remove = static_cast<int>(i);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.40s...", d.enc_recipients[i].c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("%s", d.enc_recipients[i].c_str());
+        ImGui::PopID();
+      }
+      if (remove >= 0)
+        d.enc_recipients.erase(d.enc_recipients.begin() + remove);
+      static char did_buf[128] = "";
+      ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+      ImGui::InputTextWithHint("##did", "did:key:z6LS...", did_buf,
+                               sizeof did_buf);
+      ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_PLUS "  Add") && did_buf[0] != '\0') {
+        d.enc_recipients.push_back(did_buf);
+        did_buf[0] = '\0';
+      }
+      ImGui::SameLine();
+      const bool have_my =
+          g_enc_key_idx >= 0 &&
+          g_enc_key_idx < static_cast<int>(g_enc_keys.size());
+      ImGui::BeginDisabled(!have_my);
+      if (ImGui::Button(ICON_FA_USER_SHIELD "  My key"))
+        d.enc_recipients.push_back(g_enc_keys[g_enc_key_idx].did);
+      ImGui::EndDisabled();
+      ImGui::Spacing();
+      ImGui::BeginDisabled(d.enc_recipients.empty());
+      if (ImGui::Button(ICON_FA_LOCK "  Encrypt")) encrypt_document(d);
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("AES-256-GCM in place; the content key is HPKE-\n"
+                          "wrapped to each recipient; policy.yaml written;\n"
+                          "manifest rebuilt over the ciphertext.");
+    }
+  }
+  ImGui::End();
+}
+
+// Hash-chained timeline: verify the chain, append entries, sign a checkpoint.
+void draw_audit_panel() {
+  if (!g_show_audit) return;
+  ImGui::SetNextWindowSize(ImVec2(480, 400), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_TIMELINE "  Audit###Audit", &g_show_audit)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      refresh_audit(d);
+
+      if (d.audit.empty()) {
+        ImGui::TextDisabled("(no audit.log - append the first entry below)");
+      } else {
+        if (d.audit_chain.ok)
+          ImGui::TextColored(kBound, ICON_FA_LINK "  chain OK - %d entr%s",
+                             static_cast<int>(d.audit_chain.entries),
+                             d.audit_chain.entries == 1 ? "y" : "ies");
+        else
+          ImGui::TextColored(kMissing, ICON_FA_LINK "  chain BROKEN - %s",
+                             d.audit_chain.error.c_str());
+        if (d.audit_cp.present) {
+          ImGui::SameLine();
+          if (d.audit_cp.valid)
+            ImGui::TextColored(kBound, "|  " ICON_FA_STAMP "  checkpoint VALID");
+          else
+            ImGui::TextColored(kMissing, "|  " ICON_FA_STAMP "  checkpoint INVALID");
+          if (ImGui::IsItemHovered() && !d.audit_cp.kid.empty())
+            ImGui::SetTooltip("signed head by %s", d.audit_cp.kid.c_str());
+        }
+        const ImGuiTableFlags tflags =
+            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+        const float table_h =
+            ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeight() * 2.4f;
+        if (ImGui::BeginTable("##audit", 3, tflags,
+                              ImVec2(0.0f, std::max(80.0f, table_h)))) {
+          ImGui::TableSetupScrollFreeze(0, 1);
+          ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed,
+                                  ImGui::GetFontSize() * 10.0f);
+          ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed,
+                                  ImGui::GetFontSize() * 6.0f);
+          ImGui::TableSetupColumn("Actor", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableHeadersRow();
+          for (const auto& e : d.audit) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", e.timestamp.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.action.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", e.actor.c_str());
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("%s\nprev: %.16s...", e.actor.c_str(),
+                                e.prev_hash.c_str());
+          }
+          ImGui::EndTable();
+        }
+      }
+
+      static char action_buf[48] = "EDITED";
+      ImGui::SetNextItemWidth(140.0f);
+      ImGui::InputText("##action", action_buf, sizeof action_buf);
+      ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_PLUS "  Append") && action_buf[0] != '\0')
+        audit_append_entry(d, action_buf);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Append a hash-chained entry\n(actor = the selected "
+                          "signing key's DID)");
+      ImGui::SameLine();
+      const bool can_cp = g_key_idx >= 0 &&
+                          g_key_idx < static_cast<int>(g_keys.size()) &&
+                          g_keys[g_key_idx].key.has_value() && !d.audit.empty();
+      ImGui::BeginDisabled(!can_cp);
+      if (ImGui::Button(ICON_FA_STAMP "  Checkpoint")) audit_make_checkpoint(d);
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Sign the current log head (detached JWS)\nwith the "
+                          "selected signing key.");
+    }
+  }
+  ImGui::End();
+}
+
+// Profile runner: Core / Integrity / Signed / Encrypted / Render with the
+// normative error codes - the same result 'mcdf validate' prints.
+void draw_conformance_panel() {
+  if (!g_show_conformance) return;
+  ImGui::SetNextWindowSize(ImVec2(460, 380), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_LIST_CHECK "  Conformance###Conformance",
+                   &g_show_conformance)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      refresh_conformance(d);
+      ImGui::TextDisabled("Profiles run against the working copy on disk.");
+      ImGui::Spacing();
+      for (std::size_t i = 0; i < d.conf_reports.size(); ++i) {
+        const mcdf::ValidationReport& r = d.conf_reports[i];
+        ImGui::PushID(static_cast<int>(i));
+        if (r.ok) ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK);
+        else ImGui::TextColored(kMissing, ICON_FA_CIRCLE_XMARK);
+        ImGui::SameLine();
+        const std::string_view name = mcdf::to_string(r.profile);
+        ImGui::Text("%.*s", static_cast<int>(name.size()), name.data());
+        if (!r.ok) {
+          ImGui::SameLine();
+          ImGui::TextDisabled("(%d issue%s)", static_cast<int>(r.issues.size()),
+                              r.issues.size() == 1 ? "" : "s");
+          ImGui::Indent();
+          for (const auto& issue : r.issues) {
+            ImGui::TextColored(kMissing, "%s", issue.code.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("- %s", issue.message.c_str());
+          }
+          ImGui::Unindent();
+        }
+        ImGui::PopID();
+      }
+      ImGui::Spacing();
+      ImGui::TextDisabled("Each profile is a superset of the one above it.");
+    }
+  }
+  ImGui::End();
+}
+
+// Packaging + provenance: what is in the container, its hash, and the
+// canonical engine render (the bytes that ship, not the live preview).
+void draw_container_panel() {
+  if (!g_show_container) return;
+  ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_BOX_ARCHIVE "  Container###Container",
+                   &g_show_container)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      ImGui::TextDisabled("%s", d.is_archive ? ".mcdf document (deterministic TAR)"
+                                             : "unpacked folder");
+      if (!d.path.empty()) {
+        ImGui::TextUnformatted(d.path.c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Working copy: %s", d.workdir.string().c_str());
+      }
+      if (!d.container_hash.empty()) {
+        ImGui::TextDisabled(ICON_FA_HASHTAG "  container %.16s...",
+                            d.container_hash.c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("sha256(manifest.json) = %s\nClick to copy",
+                            d.container_hash.c_str());
+        if (ImGui::IsItemClicked())
+          ImGui::SetClipboardText(d.container_hash.c_str());
+      }
+      if (ImGui::Button(ICON_FA_FLOPPY_DISK "  Save")) save(d);
+      ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_FLOPPY_DISK "  Save As...")) {
+        g_active = &d;
+        open_save_as_dialog();
+      }
+
+      ImGui::Spacing();
+      const float render_h = ImGui::GetFrameHeight() * 4.6f;
+      const float table_h = ImGui::GetContentRegionAvail().y - render_h;
+      const ImGuiTableFlags tflags =
+          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+          ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+      if (ImGui::BeginTable("##members", 2, tflags,
+                            ImVec2(0.0f, std::max(80.0f, table_h)))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Member", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 5.0f);
+        ImGui::TableHeadersRow();
+        std::error_code ec;
+        for (const auto& f : d.files) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(f.c_str());
+          ImGui::TableNextColumn();
+          const auto size = fs::file_size(d.workdir / f, ec);
+          if (ec) ImGui::TextDisabled("-");
+          else if (size < 1024) ImGui::TextDisabled("%d B", static_cast<int>(size));
+          else if (size < 1024 * 1024)
+            ImGui::TextDisabled("%.1f KB", static_cast<double>(size) / 1024.0);
+          else
+            ImGui::TextDisabled("%.1f MB",
+                                static_cast<double>(size) / (1024.0 * 1024.0));
+        }
+        ImGui::EndTable();
+      }
+
+      ImGui::SeparatorText(ICON_FA_FILE_EXPORT "  Canonical render");
+      ImGui::TextDisabled(
+          "Engine-produced, deterministic, with a provenance stamp\n"
+          "(source hash + renderer v%s). The live preview approximates;\n"
+          "this is what ships.",
+          std::string(mcdf::version_string()).c_str());
+      if (ImGui::Button(ICON_FA_FILE_EXPORT "  Export HTML...")) {
+        g_active = &d;
+        open_export_render_dialog(true);
+      }
+      ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_FILE_EXPORT "  Export text...")) {
+        g_active = &d;
+        open_export_render_dialog(false);
+      }
+    }
+  }
+  ImGui::End();
+}
+
 // One document = a dockable window with an editor | preview split.
 void draw_document_window(Document& d) {
   const std::string name = d.path.empty() ? std::string("untitled")
@@ -2075,6 +2692,12 @@ void draw_document_window(Document& d) {
 
     if (!d.has_content) {
       ImGui::TextUnformatted("(no content.md)");
+    } else if (d.content_encrypted) {
+      const ImVec2 avail = ImGui::GetContentRegionAvail();
+      ImGui::SetCursorPos(ImVec2(avail.x * 0.5f - 160.0f, avail.y * 0.45f));
+      ImGui::TextDisabled(ICON_FA_LOCK
+                          "  content.md is encrypted - decrypt to edit "
+                          "(View > Encryption)");
     } else {
       const ImVec2 avail = ImGui::GetContentRegionAvail();
       const float splitter = 6.0f;
@@ -2343,6 +2966,10 @@ int main() {
       else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
       else if (g_pending == OpenMode::Wallpaper) { g_prefs.wallpaper_path = picked; load_wallpaper(picked); }
       else if (g_pending == OpenMode::LoadKey) add_key_from_file(picked, true);
+      else if (g_pending == OpenMode::ExportHtml && g_target_doc)
+        export_render(*g_target_doc, mcdf::RenderFormat::kHtml, picked);
+      else if (g_pending == OpenMode::ExportText && g_target_doc)
+        export_render(*g_target_doc, mcdf::RenderFormat::kText, picked);
       g_pending = OpenMode::None;
       g_target_doc = nullptr;
     } else if (dlg_res == imfd::Result::Cancelled) {
@@ -2357,6 +2984,10 @@ int main() {
     draw_schema_panel();
     draw_manifest_panel();
     draw_trust_panel();
+    draw_encryption_panel();
+    draw_audit_panel();
+    draw_conformance_panel();
+    draw_container_panel();
     draw_status_bar();
     draw_settings();
 
