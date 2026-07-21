@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -83,6 +84,16 @@ struct Document {
   std::string doc_type;     // schema.document_type
   int heading_count = 0;
 
+  // E2: editable metadata.yaml / schema.yaml models + the live outline.
+  mcdf::Metadata meta;
+  mcdf::Schema schema;
+  bool write_meta = false;    // metadata.yaml exists or was edited -> written on save
+  bool write_schema = false;  // same for schema.yaml
+  bool props_dirty = false;   // unsaved metadata/schema edits
+  std::vector<mcdf::Heading> outline;  // headings of the current editor buffer
+  std::vector<int> outline_lines;      // 0-based editor line per outline entry (-1 unknown)
+  std::size_t outline_undo = static_cast<std::size_t>(-1);  // undo index the cache was built at
+
   std::unique_ptr<TextEditor> editor;
   std::size_t saved_undo = 0;
   fs::path workdir;
@@ -125,6 +136,11 @@ std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
 
+// E2 panels (View menu): outline + schema binding, metadata form, schema form.
+bool g_show_structure = true;
+bool g_show_metadata = false;
+bool g_show_schema = false;
+
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
 double g_last_input = 0.0;  // glfwGetTime() of the last user input (idle throttle)
@@ -136,7 +152,74 @@ enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage, Wallpaper };
 OpenMode g_pending = OpenMode::None;
 
 bool is_dirty(const Document& d) {
-  return d.editor && d.editor->GetUndoIndex() != d.saved_undo;
+  return d.props_dirty || (d.editor && d.editor->GetUndoIndex() != d.saved_undo);
+}
+
+// Reparse the outline when the editor buffer changed (undo index moved), and
+// map each heading to its editor line: an ordered scan over ATX (and setext)
+// heading lines, skipping fenced code blocks. libmcdf's parse_headings stays
+// the authority on what a heading *is* (levels, {#id} binding); the line scan
+// only locates them for click-to-jump.
+const std::vector<mcdf::Heading>& outline_of(Document& d) {
+  if (!d.editor) return d.outline;
+  const std::size_t undo = d.editor->GetUndoIndex();
+  if (undo == d.outline_undo) return d.outline;
+  d.outline_undo = undo;
+  d.outline.clear();
+  d.outline_lines.clear();
+  const std::string text = d.editor->GetText();
+  if (auto h = mcdf::parse_headings(text)) d.outline = std::move(*h);
+  d.heading_count = static_cast<int>(d.outline.size());
+
+  std::vector<int> lines;
+  bool in_fence = false;
+  int line_no = 0;
+  std::string prev;  // previous line (for setext underlines)
+  std::size_t pos = 0;
+  while (pos <= text.size()) {
+    const std::size_t eol = text.find('\n', pos);
+    const std::string line =
+        text.substr(pos, (eol == std::string::npos ? text.size() : eol) - pos);
+    std::size_t i = 0;
+    while (i < line.size() && i < 3 && line[i] == ' ') ++i;
+    const std::string_view body = std::string_view(line).substr(i);
+    if (body.rfind("```", 0) == 0 || body.rfind("~~~", 0) == 0) {
+      in_fence = !in_fence;
+    } else if (!in_fence) {
+      std::size_t hashes = 0;
+      while (hashes < body.size() && body[hashes] == '#') ++hashes;
+      const bool atx = hashes >= 1 && hashes <= 6 &&
+                       (hashes == body.size() || body[hashes] == ' ' ||
+                        body[hashes] == '\t');
+      const bool setext =
+          !body.empty() && !prev.empty() &&
+          body.find_first_not_of(body[0] == '=' ? "= \t" : "- \t") ==
+              std::string_view::npos &&
+          (body[0] == '=' || body[0] == '-') &&
+          prev.find_first_not_of(" \t") != std::string::npos;
+      if (atx) lines.push_back(line_no);
+      else if (setext && (lines.empty() || lines.back() != line_no - 1))
+        lines.push_back(line_no - 1);  // the underline names the line above
+    }
+    prev = line;
+    ++line_no;
+    if (eol == std::string::npos) break;
+    pos = eol + 1;
+  }
+  // The scan and md4c agree on ordering for well-formed documents; align by
+  // index and leave any tail unmapped rather than guessing.
+  d.outline_lines.assign(d.outline.size(), -1);
+  for (std::size_t k = 0; k < d.outline.size() && k < lines.size(); ++k)
+    d.outline_lines[k] = lines[k];
+  return d.outline;
+}
+
+// True if some heading in the current outline carries this explicit {#id}.
+bool outline_has_id(const Document& d, const std::string& id) {
+  if (id.empty()) return false;
+  for (const auto& h : d.outline)
+    if (h.id == id) return true;
+  return false;
 }
 
 // ---- preview image textures ----------------------------------------------------
@@ -331,6 +414,12 @@ void load_preferences() {
       g_saved_mono_font = v;
     } else if (k == "idle_throttle") {
       g_prefs.idle_throttle = (v != "0");
+    } else if (k == "panel_structure") {
+      g_show_structure = (v != "0");
+    } else if (k == "panel_metadata") {
+      g_show_metadata = (v != "0");
+    } else if (k == "panel_schema") {
+      g_show_schema = (v != "0");
     } else if (k == "wallpaper") {
       g_prefs.wallpaper_path = v;
     } else if (k == "wallpaper_opacity") {
@@ -358,6 +447,9 @@ void save_preferences(GLFWwindow* w) {
   f << "theme=" << g_prefs.theme << '\n';
   f << "font_size=" << g_prefs.font_size << '\n';
   f << "idle_throttle=" << (g_prefs.idle_throttle ? 1 : 0) << '\n';
+  f << "panel_structure=" << (g_show_structure ? 1 : 0) << '\n';
+  f << "panel_metadata=" << (g_show_metadata ? 1 : 0) << '\n';
+  f << "panel_schema=" << (g_show_schema ? 1 : 0) << '\n';
   f << "wallpaper=" << g_prefs.wallpaper_path << '\n';
   f << "wallpaper_opacity=" << g_prefs.wallpaper_opacity << '\n';
   f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
@@ -606,14 +698,26 @@ void load_into(Document& d) {
       d.status = "read content.md failed: " + raw.error().message;
     }
   }
+  d.meta = {};
+  d.schema = {};
+  d.write_meta = d.write_schema = d.props_dirty = false;
   if (auto doc = mcdf::load_document(c)) {
-    if (doc->has_metadata) d.title = doc->metadata.title;
-    if (doc->has_schema) d.doc_type = doc->schema.document_type;
+    if (doc->has_metadata) {
+      d.meta = doc->metadata;
+      d.title = doc->metadata.title;
+    }
+    d.write_meta = doc->has_metadata;
+    if (doc->has_schema) {
+      d.schema = doc->schema;
+      d.doc_type = doc->schema.document_type;
+    }
+    d.write_schema = doc->has_schema;
     d.heading_count = static_cast<int>(doc->headings.size());
   }
   d.editor->SetText(content);
   d.editor->SetReadOnlyEnabled(false);
   d.saved_undo = d.editor->GetUndoIndex();
+  d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
   if (d.status.empty()) d.status = "opened " + d.path;
 }
 
@@ -629,6 +733,10 @@ void set_archive(Document& d, const std::string& path) {
   d.title.clear();
   d.doc_type.clear();
   d.heading_count = 0;
+  d.meta = {};
+  d.schema = {};
+  d.write_meta = d.write_schema = d.props_dirty = false;
+  d.outline_undo = static_cast<std::size_t>(-1);
   d.status.clear();
 
   bool ok = false;
@@ -708,23 +816,47 @@ void new_blank_document() {
   d->status = "new document - Save to choose a file";
 }
 
-// Write the editor text to content.md and keep the manifest in sync.
-bool flush_working_copy(Document& d) {
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+// Write the document's editable members (content.md, metadata.yaml,
+// schema.yaml) into a directory and keep its manifest in sync. YAML bytes come
+// from libmcdf's writers so Studio and the CLI emit identical members.
+bool write_members(Document& d, const fs::path& where, std::string& err) {
+  auto dir = mcdf::DirectoryContainer::open(where);
   if (!dir) {
-    d.status = "save failed: " + dir.error().message;
+    err = dir.error().message;
     return false;
   }
   if (auto w = (*dir)->write("content.md", d.editor->GetText()); !w) {
-    d.status = "save failed: " + w.error().message;
+    err = w.error().message;
     return false;
   }
+  if (d.write_meta) {
+    if (auto w = (*dir)->write("metadata.yaml", mcdf::metadata_to_yaml(d.meta)); !w) {
+      err = w.error().message;
+      return false;
+    }
+  }
+  if (d.write_schema) {
+    if (auto w = (*dir)->write("schema.yaml", mcdf::schema_to_yaml(d.schema)); !w) {
+      err = w.error().message;
+      return false;
+    }
+  }
   if ((*dir)->contains("manifest.json")) {
-    if (auto container = mcdf::open_container(d.workdir))
+    if (auto container = mcdf::open_container(where))
       if (auto m = mcdf::build_manifest(**container))
         if (auto json = mcdf::manifest_to_canonical_json(*m))
           (void)(*dir)->write("manifest.json", *json);
   }
+  return true;
+}
+
+bool flush_working_copy(Document& d) {
+  std::string err;
+  if (!write_members(d, d.workdir, err)) {
+    d.status = "save failed: " + err;
+    return false;
+  }
+  d.props_dirty = false;
   return true;
 }
 
@@ -765,17 +897,17 @@ void save_as(Document& d, std::string path) {
   if (!d.editor || d.workdir.empty()) return;
   if (path.size() < 5 || path.substr(path.size() - 5) != ".mcdf") path += ".mcdf";
 
+  // Stage into a temp copy: in folder mode d.workdir is the user's real
+  // folder, which Save As must not modify.
   std::error_code ec;
   const fs::path tmp = make_workdir();
   fs::copy(d.workdir, tmp,
            fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-  if (auto dir = mcdf::DirectoryContainer::open(tmp)) {
-    (void)(*dir)->write("content.md", d.editor->GetText());
-    if ((*dir)->contains("manifest.json"))
-      if (auto c = mcdf::open_container(tmp))
-        if (auto m = mcdf::build_manifest(**c))
-          if (auto j = mcdf::manifest_to_canonical_json(*m))
-            (void)(*dir)->write("manifest.json", *j);
+  std::string err;
+  if (!write_members(d, tmp, err)) {
+    fs::remove_all(tmp, ec);
+    d.status = "save-as failed: " + err;
+    return;
   }
   bool ok = false;
   if (auto c = mcdf::open_container(tmp))
@@ -1009,6 +1141,12 @@ void draw_menu_bar() {
       g_quit = true;
     ImGui::EndMenu();
   }
+  if (ImGui::BeginMenu("View")) {
+    ImGui::MenuItem(ICON_FA_LIST "  Structure", nullptr, &g_show_structure);
+    ImGui::MenuItem(ICON_FA_TAGS "  Metadata", nullptr, &g_show_metadata);
+    ImGui::MenuItem(ICON_FA_SITEMAP "  Schema", nullptr, &g_show_schema);
+    ImGui::EndMenu();
+  }
   if (ImGui::BeginMenu("Insert")) {
     const bool can = g_active && g_active->has_content;
     if (ImGui::MenuItem(ICON_FA_IMAGE "  Image...", nullptr, false, can))
@@ -1080,6 +1218,267 @@ void editor_context_menu(Document& d) {
   }
 }
 
+// ---- E2 panels: Structure / Metadata / Schema ----------------------------------
+
+const ImVec4 kBound{0.30f, 0.80f, 0.40f, 1.0f};
+const ImVec4 kMissing{0.90f, 0.35f, 0.35f, 1.0f};
+
+// InputText over a std::string via a stack buffer (fields here are short).
+bool input_text(const char* label, std::string& value) {
+  char buf[512];
+  std::snprintf(buf, sizeof buf, "%s", value.c_str());
+  ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x * 0.60f));
+  if (ImGui::InputText(label, buf, sizeof buf)) {
+    value = buf;
+    return true;
+  }
+  return false;
+}
+
+std::string iso8601_now_utc() {
+  const std::time_t t = std::time(nullptr);
+  std::tm tm{};
+#if defined(_WIN32)
+  gmtime_s(&tm, &t);
+#else
+  gmtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+void jump_to_heading(Document& d, std::size_t idx) {
+  if (!d.editor || idx >= d.outline_lines.size()) return;
+  const int line = d.outline_lines[idx];
+  if (line < 0) return;
+  d.editor->SetCursor(line, 0);
+  d.editor->ScrollToLine(line, TextEditor::Scroll::alignTop);
+  d.editor->SetFocus();
+}
+
+// The active document, or null if none has content (panels act on g_active).
+Document* panel_target() {
+  return (g_active && g_active->has_content) ? g_active : nullptr;
+}
+
+// Outline of the live editor buffer + schema sections with their binding
+// status. A section is "bound" when some heading carries its explicit {#id} -
+// the same rule core/validate.cpp checks with E_REQUIRED_SECTION_MISSING /
+// E_SCHEMA_UNBOUND.
+void draw_structure_panel() {
+  if (!g_show_structure) return;
+  ImGui::SetNextWindowSize(ImVec2(320, 520), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_LIST "  Structure###Structure", &g_show_structure)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      const auto& outline = outline_of(d);
+
+      ImGui::SeparatorText(ICON_FA_HEADING "  Outline");
+      if (outline.empty()) ImGui::TextDisabled("(no headings)");
+      for (std::size_t i = 0; i < outline.size(); ++i) {
+        const mcdf::Heading& h = outline[i];
+        ImGui::PushID(static_cast<int>(i));
+        const float indent = static_cast<float>(std::max(0, h.level - 1)) * 14.0f;
+        if (indent > 0.0f) ImGui::Indent(indent);
+        std::string label = h.text.empty() ? "(untitled)" : h.text;
+        if (!h.id.empty()) label += "  {#" + h.id + "}";
+        if (ImGui::Selectable(label.c_str())) jump_to_heading(d, i);
+        if (ImGui::IsItemHovered() && i < d.outline_lines.size() &&
+            d.outline_lines[i] >= 0)
+          ImGui::SetTooltip("H%d - line %d", h.level, d.outline_lines[i] + 1);
+        if (indent > 0.0f) ImGui::Unindent(indent);
+        ImGui::PopID();
+      }
+
+      ImGui::Spacing();
+      ImGui::SeparatorText(ICON_FA_SITEMAP "  Schema sections");
+      if (!d.write_schema) {
+        ImGui::TextDisabled("(no schema.yaml - use the Schema panel to add one)");
+      } else if (d.schema.sections.empty()) {
+        ImGui::TextDisabled("(schema has no sections)");
+      } else {
+        for (std::size_t i = 0; i < d.schema.sections.size(); ++i) {
+          const mcdf::SchemaSection& s = d.schema.sections[i];
+          const bool bound = outline_has_id(d, s.id);
+          ImGui::PushID(static_cast<int>(1000 + i));
+          if (bound) ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK);
+          else if (s.required) ImGui::TextColored(kMissing, ICON_FA_CIRCLE_XMARK);
+          else ImGui::TextDisabled(ICON_FA_CIRCLE_QUESTION);
+          ImGui::SameLine();
+          const std::string label = s.title.empty() ? s.id : s.title;
+          if (ImGui::Selectable(label.c_str()) && bound) {
+            for (std::size_t k = 0; k < outline.size(); ++k)
+              if (outline[k].id == s.id) { jump_to_heading(d, k); break; }
+          }
+          if (ImGui::IsItemHovered()) {
+            if (bound)
+              ImGui::SetTooltip("{#%s}%s - bound to a heading", s.id.c_str(),
+                                s.required ? " (required)" : "");
+            else
+              ImGui::SetTooltip("{#%s} has no matching heading\n%s\n"
+                                "Bind it with a heading like:  ## %s {#%s}",
+                                s.id.c_str(),
+                                s.required ? "E_REQUIRED_SECTION_MISSING"
+                                           : "E_SCHEMA_UNBOUND",
+                                label.c_str(), s.id.c_str());
+          }
+          ImGui::PopID();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Sections bind to headings by explicit {#id}.");
+      }
+    }
+  }
+  ImGui::End();
+}
+
+// Form over metadata.yaml. Editing any field marks the document dirty and the
+// member is (re)written on Save via libmcdf's metadata_to_yaml.
+void draw_metadata_panel() {
+  if (!g_show_metadata) return;
+  ImGui::SetNextWindowSize(ImVec2(400, 480), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_TAGS "  Metadata###Metadata", &g_show_metadata)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      bool ch = false;
+      if (!d.write_meta)
+        ImGui::TextDisabled("(no metadata.yaml yet - editing creates it on Save)");
+
+      ch |= input_text("Title", d.meta.title);
+      ch |= input_text("Version", d.meta.version);
+
+      ImGui::SeparatorText(ICON_FA_USER "  Authors");
+      int remove = -1;
+      for (std::size_t i = 0; i < d.meta.authors.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::TextDisabled("Author %d", static_cast<int>(i) + 1);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_TRASH)) remove = static_cast<int>(i);
+        ch |= input_text("Name", d.meta.authors[i].name);
+        ch |= input_text("DID / id", d.meta.authors[i].id);
+        ImGui::PopID();
+      }
+      if (remove >= 0) {
+        d.meta.authors.erase(d.meta.authors.begin() + remove);
+        ch = true;
+      }
+      if (ImGui::Button(ICON_FA_PLUS "  Add author")) {
+        d.meta.authors.push_back({});
+        ch = true;
+      }
+
+      ImGui::SeparatorText("Details");
+      ch |= input_text("Created at", d.meta.created_at);
+      ImGui::SameLine();
+      if (ImGui::SmallButton("now")) {
+        d.meta.created_at = iso8601_now_utc();
+        ch = true;
+      }
+      ch |= input_text("Classification", d.meta.classification);
+      ch |= input_text("Language", d.meta.language);
+
+      bool generated = d.meta.generated_by.has_value();
+      if (ImGui::Checkbox("AI-generated (provenance)", &generated)) {
+        if (generated) d.meta.generated_by = std::string{};
+        else d.meta.generated_by.reset();
+        ch = true;
+      }
+      if (d.meta.generated_by) {
+        std::string tool = *d.meta.generated_by;
+        if (input_text("Generated by", tool)) {
+          d.meta.generated_by = tool;
+          ch = true;
+        }
+      }
+
+      if (ch) {
+        d.write_meta = true;
+        d.props_dirty = true;
+        d.title = d.meta.title;  // keep the status bar in sync
+      }
+    }
+  }
+  ImGui::End();
+}
+
+// Form over schema.yaml: document_type + the ordered section list.
+void draw_schema_panel() {
+  if (!g_show_schema) return;
+  ImGui::SetNextWindowSize(ImVec2(400, 480), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_SITEMAP "  Schema###Schema", &g_show_schema)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      bool ch = false;
+      if (!d.write_schema)
+        ImGui::TextDisabled("(no schema.yaml yet - editing creates it on Save)");
+
+      ch |= input_text("Document type", d.schema.document_type);
+
+      ImGui::SeparatorText("Sections");
+      outline_of(d);  // refresh binding status
+      int remove = -1, move_up = -1, move_down = -1;
+      for (std::size_t i = 0; i < d.schema.sections.size(); ++i) {
+        mcdf::SchemaSection& s = d.schema.sections[i];
+        ImGui::PushID(static_cast<int>(i));
+        if (outline_has_id(d, s.id)) ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK);
+        else if (s.required) ImGui::TextColored(kMissing, ICON_FA_CIRCLE_XMARK);
+        else ImGui::TextDisabled(ICON_FA_CIRCLE_QUESTION);
+        ImGui::SameLine();
+        ImGui::TextDisabled("Section %d", static_cast<int>(i) + 1);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_ARROW_UP) && i > 0)
+          move_up = static_cast<int>(i);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_ARROW_DOWN) &&
+            i + 1 < d.schema.sections.size())
+          move_down = static_cast<int>(i);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_TRASH)) remove = static_cast<int>(i);
+        ch |= input_text("Id", s.id);
+        ch |= input_text("Title", s.title);
+        ch |= ImGui::Checkbox("Required", &s.required);
+        ImGui::PopID();
+      }
+      if (move_up > 0) {
+        std::swap(d.schema.sections[move_up - 1], d.schema.sections[move_up]);
+        ch = true;
+      }
+      if (move_down >= 0) {
+        std::swap(d.schema.sections[move_down], d.schema.sections[move_down + 1]);
+        ch = true;
+      }
+      if (remove >= 0) {
+        d.schema.sections.erase(d.schema.sections.begin() + remove);
+        ch = true;
+      }
+      if (ImGui::Button(ICON_FA_PLUS "  Add section")) {
+        d.schema.sections.push_back({});
+        ch = true;
+      }
+      ImGui::Spacing();
+      ImGui::TextDisabled("A section binds when content.md has a heading\n"
+                          "with its id, e.g.  ## Title {#id}");
+
+      if (ch) {
+        d.write_schema = true;
+        d.props_dirty = true;
+        d.doc_type = d.schema.document_type;  // keep the status bar in sync
+      }
+    }
+  }
+  ImGui::End();
+}
+
 // One document = a dockable window with an editor | preview split.
 void draw_document_window(Document& d) {
   const std::string name = d.path.empty() ? std::string("untitled")
@@ -1143,7 +1542,8 @@ void draw_document_window(Document& d) {
 }
 
 // Formatted document summary shown as a tooltip on the footer's file label.
-void document_info_tooltip(const Document& d) {
+void document_info_tooltip(Document& d) {
+  outline_of(d);  // keep heading count + section binding fresh
   ImGui::BeginTooltip();
   // Two columns: dim labels auto-size to the widest, values left-align in a
   // single column beside them.
@@ -1162,6 +1562,13 @@ void document_info_tooltip(const Document& d) {
     lbl("Kind");
     ImGui::TextUnformatted(d.is_archive ? ".mcdf document" : "unpacked folder");
     lbl("Headings"); ImGui::Text("%d", d.heading_count);
+    if (d.write_schema && !d.schema.sections.empty()) {
+      int bound = 0;
+      for (const auto& s : d.schema.sections)
+        if (outline_has_id(d, s.id)) ++bound;
+      lbl("Sections");
+      ImGui::Text("%d / %d bound", bound, static_cast<int>(d.schema.sections.size()));
+    }
     lbl("Members");  ImGui::Text("%d", static_cast<int>(d.files.size()));
     ImGui::EndTable();
   }
@@ -1343,6 +1750,9 @@ int main() {
     if (dlg_res != imfd::Result::None) save_preferences(g_window);
 
     for (auto& d : g_documents) draw_document_window(*d);
+    draw_structure_panel();
+    draw_metadata_panel();
+    draw_schema_panel();
     draw_status_bar();
     draw_settings();
 
