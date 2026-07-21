@@ -18,6 +18,7 @@ add_library(mcdf
   container/open.cpp
   serialize/markdown.cpp
   serialize/parsers.cpp
+  serialize/writers.cpp
   serialize/canonical_json.cpp
   serialize/policy_yaml.cpp
   serialize/audit_log.cpp

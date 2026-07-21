@@ -7,6 +7,7 @@ add_executable(mcdf-tests
   test_smoke.cpp
   test_inspect.cpp
   test_canonical_json.cpp
+  test_writers.cpp
   test_manifest.cpp
   test_validate.cpp
   test_crypto.cpp

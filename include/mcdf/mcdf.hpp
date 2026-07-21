@@ -19,6 +19,7 @@
 #include "mcdf/serialize/audit_log.hpp"
 #include "mcdf/serialize/render.hpp"
 #include "mcdf/serialize/parsers.hpp"
+#include "mcdf/serialize/writers.hpp"
 #include "mcdf/serialize/canonical_json.hpp"
 #include "mcdf/crypto/hash.hpp"
 #include "mcdf/crypto/encoding.hpp"
