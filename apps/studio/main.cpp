@@ -111,6 +111,11 @@ struct Document {
   std::unordered_map<std::string, std::string> cur_hash;  // member -> current hash
   std::vector<std::string> extra_files;  // on disk but not listed in the manifest
 
+  // E4: signature checks over the working copy (verify_container), re-run
+  // when the disk state changes.
+  std::vector<mcdf::SignatureCheck> sigs;
+  int sig_disk_rev = -1;
+
   std::unique_ptr<TextEditor> editor;
   std::size_t saved_undo = 0;
   fs::path workdir;
@@ -153,12 +158,27 @@ std::vector<std::pair<std::string, std::string>> g_fonts;
 bool g_font_rebuild = false;
 bool g_show_settings = false;
 
-// E2/E3 panels (View menu): outline + schema binding, metadata form, schema
-// form, manifest integrity table.
+// E2/E3/E4 panels (View menu): outline + schema binding, metadata form, schema
+// form, manifest integrity table, trust (sign/verify).
 bool g_show_structure = true;
 bool g_show_metadata = false;
 bool g_show_schema = false;
 bool g_show_manifest = true;
+bool g_show_trust = true;
+
+// E4: the signing keystore. PEM keys live in config_dir()/keys; external PEMs
+// can be loaded in place. App-level state - one selected key signs any document.
+struct SigningKey {
+  std::string name;  // display name (file stem)
+  std::string path;  // PEM file path
+  std::string did;   // did:key of the public half
+  std::string alg;   // "EdDSA" | "ES256"
+  std::optional<mcdf::PrivateKey> key;
+};
+std::vector<SigningKey> g_keys;
+int g_key_idx = -1;
+std::string g_saved_key_path;      // from preferences: reselect on start
+std::string g_sig_name = "author"; // signatures/<name>.sig
 
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
@@ -167,7 +187,7 @@ std::string g_last_dir;
 std::vector<std::string> g_recent;  // recently opened documents (most-recent first)
 fs::path g_render_workdir;  // working dir of the document being previewed (for images)
 
-enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage, Wallpaper };
+enum class OpenMode { None, Archive, Folder, SaveAs, InsertImage, Wallpaper, LoadKey };
 OpenMode g_pending = OpenMode::None;
 
 bool is_dirty(const Document& d) {
@@ -441,6 +461,10 @@ void load_preferences() {
       g_show_schema = (v != "0");
     } else if (k == "panel_manifest") {
       g_show_manifest = (v != "0");
+    } else if (k == "panel_trust") {
+      g_show_trust = (v != "0");
+    } else if (k == "signing_key") {
+      g_saved_key_path = v;
     } else if (k == "wallpaper") {
       g_prefs.wallpaper_path = v;
     } else if (k == "wallpaper_opacity") {
@@ -472,6 +496,12 @@ void save_preferences(GLFWwindow* w) {
   f << "panel_metadata=" << (g_show_metadata ? 1 : 0) << '\n';
   f << "panel_schema=" << (g_show_schema ? 1 : 0) << '\n';
   f << "panel_manifest=" << (g_show_manifest ? 1 : 0) << '\n';
+  f << "panel_trust=" << (g_show_trust ? 1 : 0) << '\n';
+  f << "signing_key="
+    << (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size())
+            ? g_keys[g_key_idx].path
+            : g_saved_key_path)
+    << '\n';
   f << "wallpaper=" << g_prefs.wallpaper_path << '\n';
   f << "wallpaper_opacity=" << g_prefs.wallpaper_opacity << '\n';
   f << "ui_font=" << (g_prefs.ui_idx < n ? g_fonts[g_prefs.ui_idx].first : "") << '\n';
@@ -686,6 +716,65 @@ fs::path make_workdir() {
   return dir;
 }
 
+// ---- signing keystore ----------------------------------------------------------
+
+fs::path keys_dir() {
+  std::error_code ec;
+  const fs::path dir = config_dir() / "keys";
+  fs::create_directories(dir, ec);
+  return dir;
+}
+
+// Loads a PEM as a signing key and adds it to the keystore list (deduped by
+// path). Non-signing PEMs (e.g. x25519 encryption keys) are skipped.
+bool add_key_from_file(const std::string& path, bool select) {
+  for (int i = 0; i < static_cast<int>(g_keys.size()); ++i) {
+    if (g_keys[i].path == path) {
+      if (select) g_key_idx = i;
+      return true;
+    }
+  }
+  bool ok = false;
+  const std::string pem = read_file_bytes(path, ok);
+  if (!ok) return false;
+  auto key = mcdf::PrivateKey::from_pem(pem);
+  if (!key) return false;
+  const std::string alg = key->jws_algorithm();
+  if (alg.empty()) return false;
+  auto did = key->did_key();
+  if (!did) return false;
+  g_keys.push_back(
+      {fs::path(path).stem().string(), path, *did, alg, std::move(*key)});
+  if (select || g_key_idx < 0) g_key_idx = static_cast<int>(g_keys.size()) - 1;
+  return true;
+}
+
+void scan_keys() {
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator(keys_dir(), ec)) {
+    if (!e.is_regular_file() || e.path().extension() != ".pem") continue;
+    add_key_from_file(e.path().string(), false);
+  }
+  if (!g_saved_key_path.empty()) add_key_from_file(g_saved_key_path, true);
+}
+
+// Generates an Ed25519 key into the keystore (key-<n>.pem) and selects it.
+void generate_signing_key() {
+  auto key = mcdf::PrivateKey::generate_ed25519();
+  if (!key) return;
+  auto pem = key->to_pem();
+  if (!pem) return;
+  std::error_code ec;
+  const fs::path dir = keys_dir();
+  fs::path dest;
+  for (int i = 1;; ++i) {
+    dest = dir / ("key-" + std::to_string(i) + ".pem");
+    if (!fs::exists(dest, ec)) break;
+  }
+  if (!write_file_bytes(dest.string(), *pem)) return;
+  add_key_from_file(dest.string(), true);
+}
+
 // ---- document operations -------------------------------------------------------
 
 Document* new_document() {
@@ -795,6 +884,8 @@ void set_archive(Document& d, const std::string& path) {
   d.mh_disk_rev = d.mh_props_rev = -1;
   d.mh_undo = static_cast<std::size_t>(-1);
   ++d.disk_rev;
+  d.sigs.clear();
+  d.sig_disk_rev = -1;
   d.status.clear();
 
   bool ok = false;
@@ -966,6 +1057,71 @@ void run_verify(Document& d) {
   }
 }
 
+// Re-run verify_container when the working copy changed on disk. Each
+// signatures/*.sig is checked against the canonical manifest; the algorithm
+// allow-list (EdDSA only) is enforced by the engine and surfaces as an error.
+void refresh_signatures(Document& d) {
+  if (d.sig_disk_rev == d.disk_rev) return;
+  d.sig_disk_rev = d.disk_rev;
+  d.sigs.clear();
+  if (d.workdir.empty()) return;
+  if (auto c = mcdf::open_container(d.workdir))
+    if (auto checks = mcdf::verify_container(**c)) d.sigs = std::move(*checks);
+}
+
+// Sign the canonical manifest with the selected key -> signatures/<name>.sig.
+// Mirrors the CLI: members are flushed and the manifest rebuilt first so the
+// signature always covers what the user sees.
+void sign_document(Document& d) {
+  if (g_key_idx < 0 || g_key_idx >= static_cast<int>(g_keys.size())) return;
+  const SigningKey& k = g_keys[g_key_idx];
+  if (!k.key || !d.editor || d.workdir.empty()) return;
+
+  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
+  if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
+
+  auto c = mcdf::open_container(d.workdir);
+  if (!c) {
+    d.status = "sign failed: " + c.error().message;
+    return;
+  }
+  auto jws = mcdf::sign_container(**c, *k.key, k.did);
+  if (!jws) {
+    d.status = "sign failed: " + jws.error().message;
+    return;
+  }
+  std::string name;
+  for (char ch : g_sig_name)
+    if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+      name += ch;
+  if (name.empty()) name = "author";
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) {
+    d.status = "sign failed: " + dir.error().message;
+    return;
+  }
+  const std::string sig_path = "signatures/" + name + ".sig";
+  if (auto w = (*dir)->write(sig_path, *jws); !w) {
+    d.status = "sign failed: " + w.error().message;
+    return;
+  }
+  ++d.disk_rev;  // new signature on disk -> re-verify
+  d.verify_summary.clear();
+  d.status = "signed by " + k.did + " -> " + sig_path +
+             (d.is_archive ? " (Save to write the .mcdf)" : "");
+}
+
+void remove_signature(Document& d, const std::string& file) {
+  auto dir = mcdf::DirectoryContainer::open(d.workdir);
+  if (!dir) return;
+  if (auto r = (*dir)->remove(file); !r) {
+    d.status = "remove failed: " + r.error().message;
+    return;
+  }
+  ++d.disk_rev;
+  d.status = "removed " + file;
+}
+
 void open_save_as_dialog();  // fwd: an untitled document's first Save opens it
 
 void save(Document& d) {
@@ -1113,6 +1269,16 @@ void open_insert_image_dialog() {
   g_dialog.Open(cfg);
 }
 
+void open_load_key_dialog() {
+  imfd::Config cfg;
+  cfg.title = "Load signing key (PEM)";
+  cfg.mode = imfd::Mode::OpenFile;
+  cfg.filters = {{"PEM key", {".pem"}}, {"All files", {"*"}}};
+  if (!g_last_dir.empty()) { cfg.start_dir = g_last_dir; g_last_dir.clear(); }
+  g_pending = OpenMode::LoadKey;
+  g_dialog.Open(cfg);
+}
+
 void open_wallpaper_dialog() {
   imfd::Config cfg;
   cfg.title = "Choose background image";
@@ -1252,6 +1418,7 @@ void draw_menu_bar() {
     ImGui::MenuItem(ICON_FA_TAGS "  Metadata", nullptr, &g_show_metadata);
     ImGui::MenuItem(ICON_FA_SITEMAP "  Schema", nullptr, &g_show_schema);
     ImGui::MenuItem(ICON_FA_FINGERPRINT "  Manifest", nullptr, &g_show_manifest);
+    ImGui::MenuItem(ICON_FA_SHIELD_HALVED "  Trust", nullptr, &g_show_trust);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Insert")) {
@@ -1629,6 +1796,24 @@ void refresh_manifest_view(Document& d) {
   }
 }
 
+// Live divergence between the manifest and the document as the user sees it
+// (call refresh_manifest_view first).
+struct DriftCounts {
+  int modified = 0, missing = 0, extra = 0;
+  bool any() const { return modified || missing || extra; }
+};
+
+DriftCounts manifest_drift(const Document& d) {
+  DriftCounts c;
+  for (const auto& [path, hash] : d.manifest.files) {
+    const auto it = d.cur_hash.find(path);
+    if (it == d.cur_hash.end()) ++c.missing;
+    else if (it->second != hash) ++c.modified;
+  }
+  c.extra = static_cast<int>(d.extra_files.size());
+  return c;
+}
+
 // The integrity showcase: file -> hash table with live dirty dots, container
 // hash, Rebuild (re-hash into the working copy) and Verify (engine check).
 void draw_manifest_panel() {
@@ -1648,24 +1833,20 @@ void draw_manifest_panel() {
       refresh_manifest_view(d);
 
       // Summary: algorithm, counts, container hash.
-      int modified = 0, missing = 0;
-      for (const auto& [path, hash] : d.manifest.files) {
-        const auto it = d.cur_hash.find(path);
-        if (it == d.cur_hash.end()) ++missing;
-        else if (it->second != hash) ++modified;
-      }
-      const int extra = static_cast<int>(d.extra_files.size());
+      const DriftCounts drift = manifest_drift(d);
       ImGui::TextDisabled("%s  |  %d file(s)",
                           d.manifest.hash_algorithm.c_str(),
                           static_cast<int>(d.manifest.files.size()));
       ImGui::SameLine();
-      if (modified == 0 && missing == 0 && extra == 0)
+      if (!drift.any())
         ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK "  in sync");
       else {
         std::string s;
-        if (modified) s += std::to_string(modified) + " modified";
-        if (missing) s += (s.empty() ? "" : ", ") + std::to_string(missing) + " missing";
-        if (extra) s += (s.empty() ? "" : ", ") + std::to_string(extra) + " unlisted";
+        if (drift.modified) s += std::to_string(drift.modified) + " modified";
+        if (drift.missing)
+          s += (s.empty() ? "" : ", ") + std::to_string(drift.missing) + " missing";
+        if (drift.extra)
+          s += (s.empty() ? "" : ", ") + std::to_string(drift.extra) + " unlisted";
         ImGui::TextColored(kDirty, ICON_FA_CIRCLE " %s", s.c_str());
       }
       ImGui::TextDisabled(ICON_FA_HASHTAG "  container %.16s...",
@@ -1742,6 +1923,135 @@ void draw_manifest_panel() {
         }
         ImGui::EndTable();
       }
+    }
+  }
+  ImGui::End();
+}
+
+// The flagship demo panel: signer list with live verify status, keystore, DID
+// display, sign action. A signature is shown green only when it is
+// cryptographically valid AND the manifest still matches the live document -
+// so typing one character flips it red, Rebuild alone leaves it red (the
+// manifest changed under the signature), and Re-sign turns it green again.
+void draw_trust_panel() {
+  if (!g_show_trust) return;
+  ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_SHIELD_HALVED "  Trust###Trust", &g_show_trust)) {
+    ImGui::SeparatorText(ICON_FA_KEY "  Signing key");
+    const char* sel_label =
+        (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()))
+            ? g_keys[g_key_idx].name.c_str()
+            : "(no key)";
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
+    if (ImGui::BeginCombo("##key", sel_label)) {
+      for (int i = 0; i < static_cast<int>(g_keys.size()); ++i) {
+        const std::string item = g_keys[i].name + "  (" + g_keys[i].alg + ")";
+        if (ImGui::Selectable(item.c_str(), i == g_key_idx)) g_key_idx = i;
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_PLUS "  Generate")) generate_signing_key();
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Generate an Ed25519 key into the keystore\n(%s)",
+                        keys_dir().string().c_str());
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Load PEM..."))
+      open_load_key_dialog();
+    if (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size())) {
+      const SigningKey& k = g_keys[g_key_idx];
+      ImGui::TextDisabled(ICON_FA_FINGERPRINT "  %.32s...", k.did.c_str());
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\nClick to copy", k.did.c_str());
+      if (ImGui::IsItemClicked()) ImGui::SetClipboardText(k.did.c_str());
+    } else {
+      ImGui::TextDisabled("No key selected - generate one or load a PEM.");
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText(ICON_FA_SIGNATURE "  Signatures");
+    Document* dp = panel_target();
+    if (!dp) {
+      ImGui::TextDisabled("No document with content.md is active.");
+    } else {
+      Document& d = *dp;
+      refresh_manifest_view(d);
+      refresh_signatures(d);
+      const DriftCounts drift = d.has_manifest ? manifest_drift(d) : DriftCounts{};
+
+      if (d.sigs.empty()) {
+        ImGui::TextDisabled("(no signatures)");
+      } else {
+        std::string to_remove;
+        for (std::size_t i = 0; i < d.sigs.size(); ++i) {
+          const mcdf::SignatureCheck& c = d.sigs[i];
+          ImGui::PushID(static_cast<int>(i));
+          const bool green = c.valid && !drift.any();
+          if (green) ImGui::TextColored(kBound, ICON_FA_CIRCLE_CHECK);
+          else ImGui::TextColored(kMissing, ICON_FA_CIRCLE_XMARK);
+          ImGui::SameLine();
+          ImGui::TextUnformatted(c.file.c_str());
+          if (!c.alg.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("[%s]", c.alg.c_str());
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton(ICON_FA_TRASH)) to_remove = c.file;
+          if (!c.kid.empty()) {
+            ImGui::Indent();
+            ImGui::TextDisabled(ICON_FA_USER_SHIELD "  %.40s...", c.kid.c_str());
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("%s\nClick to copy", c.kid.c_str());
+            if (ImGui::IsItemClicked()) ImGui::SetClipboardText(c.kid.c_str());
+            ImGui::Unindent();
+          }
+          ImGui::Indent();
+          if (green) {
+            ImGui::TextColored(kBound, "VALID - covers the current manifest");
+          } else if (c.valid) {
+            ImGui::TextColored(kMissing,
+                               "BROKEN - the document was edited since signing "
+                               "(rebuild + re-sign)");
+          } else {
+            ImGui::TextColored(kMissing, "INVALID%s%s",
+                               c.error.empty() ? "" : " - ",
+                               c.error.c_str());
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("The signature does not verify against the\n"
+                                "canonical manifest (edited-then-rebuilt,\n"
+                                "or the algorithm is not on the allow-list).");
+          }
+          ImGui::Unindent();
+          ImGui::Spacing();
+          ImGui::PopID();
+        }
+        if (!to_remove.empty()) remove_signature(d, to_remove);
+      }
+
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+      ImGui::SetNextItemWidth(160.0f);
+      {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%s", g_sig_name.c_str());
+        if (ImGui::InputText("##signame", buf, sizeof buf)) g_sig_name = buf;
+      }
+      ImGui::SameLine();
+      const bool can_sign =
+          g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()) &&
+          g_keys[g_key_idx].key.has_value();
+      ImGui::BeginDisabled(!can_sign);
+      if (ImGui::Button(ICON_FA_PEN_NIB "  Sign")) sign_document(d);
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(can_sign
+                              ? "Flush + rebuild the manifest, then sign its\n"
+                                "canonical bytes -> signatures/<name>.sig"
+                              : "Select or generate a signing key first.");
+      ImGui::Spacing();
+      ImGui::TextDisabled("A signature covers the canonical manifest.\n"
+                          "Edits break it; rebuild + re-sign restores it.");
     }
   }
   ImGui::End();
@@ -1886,6 +2196,22 @@ void draw_status_bar() {
         ImGui::SameLine();
         ImGui::TextColored(kDirty, ICON_FA_PEN " unsaved");
       }
+      // Trust chip: green only while every signature covers the live document.
+      if (d.has_content && !d.workdir.empty()) {
+        refresh_manifest_view(d);
+        refresh_signatures(d);
+        if (!d.sigs.empty()) {
+          const DriftCounts drift =
+              d.has_manifest ? manifest_drift(d) : DriftCounts{};
+          bool trusted = !drift.any();
+          for (const auto& c : d.sigs)
+            if (!c.valid) trusted = false;
+          ImGui::SameLine();
+          ImGui::TextColored(trusted ? kBound : kMissing,
+                             ICON_FA_SHIELD_HALVED " %s",
+                             trusted ? "signed" : "signature broken");
+        }
+      }
       ImGui::EndGroup();
       if (ImGui::IsItemHovered()) document_info_tooltip(d);  // formatted summary
       const std::string right =
@@ -1935,6 +2261,7 @@ int main() {
   if (!glfwInit()) return 1;
 
   load_preferences();
+  scan_keys();
 
 #if defined(__APPLE__)
   const char* glsl_version = "#version 150";
@@ -2015,6 +2342,7 @@ int main() {
       }
       else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
       else if (g_pending == OpenMode::Wallpaper) { g_prefs.wallpaper_path = picked; load_wallpaper(picked); }
+      else if (g_pending == OpenMode::LoadKey) add_key_from_file(picked, true);
       g_pending = OpenMode::None;
       g_target_doc = nullptr;
     } else if (dlg_res == imfd::Result::Cancelled) {
@@ -2028,6 +2356,7 @@ int main() {
     draw_metadata_panel();
     draw_schema_panel();
     draw_manifest_panel();
+    draw_trust_panel();
     draw_status_bar();
     draw_settings();
 
