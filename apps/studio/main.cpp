@@ -1798,7 +1798,13 @@ void draw_document_window(Document& d) {
           1.0f);
       ImGui::SameLine(0.0f, 0.0f);
 
-      ImGui::BeginChild("##preview", ImVec2(0.0f, avail.y), ImGuiChildFlags_None);
+      // Readable margins: the editor gets a natural left margin from its
+      // line-number gutter; give the rendered document one too.
+      const float pad = ImGui::GetFontSize();
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad * 0.75f));
+      ImGui::BeginChild("##preview", ImVec2(0.0f, avail.y),
+                        ImGuiChildFlags_AlwaysUseWindowPadding);
+      ImGui::PopStyleVar();
       g_render_workdir = d.workdir;  // for image resolution in get_image
       const std::string text = d.editor->GetText();
       static MarkdownView md;
