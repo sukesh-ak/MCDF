@@ -54,6 +54,7 @@
 
 #include <mcdf/mcdf.hpp>
 
+#include "core/studio_core.hpp"
 #include "imfiledialog/imfiledialog.h"
 #include "TextEditor.h"
 #include "imgui_md.h"
@@ -70,75 +71,44 @@ const ImVec4 kAccent{0.00f, 0.47f, 0.93f, 1.0f};
 const ImVec4 kDirty{1.00f, 0.70f, 0.20f, 1.0f};
 
 // An open document: its own editor, working copy, and save state.
-struct Document {
+// An open document: the core state (studio::Doc, headlessly testable) plus
+// this window's view state. Panels read the inherited fields directly.
+struct Document : studio::Doc {
   int id = 0;
   bool open = true;         // window open flag ([x] closes it)
   float split = 0.5f;       // editor|preview split ratio
 
-  std::string path;         // .mcdf file or folder shown to the user
-  std::string status;
-  std::vector<std::string> files;
-  bool has_content = false;
-  bool is_archive = false;  // opened from a .mcdf file
-  std::string title;        // metadata.title
-  std::string doc_type;     // schema.document_type
-  int heading_count = 0;
-
-  // E2: editable metadata.yaml / schema.yaml models + the live outline.
-  mcdf::Metadata meta;
-  mcdf::Schema schema;
-  bool write_meta = false;    // metadata.yaml exists or was edited -> written on save
-  bool write_schema = false;  // same for schema.yaml
-  bool props_dirty = false;   // unsaved metadata/schema edits
-  std::vector<mcdf::Heading> outline;  // headings of the current editor buffer
-  std::vector<int> outline_lines;      // 0-based editor line per outline entry (-1 unknown)
-  std::size_t outline_undo = static_cast<std::size_t>(-1);  // undo index the cache was built at
-
-  // E3: manifest panel state. `manifest` is manifest.json as stored in the
-  // working copy; cur_hash overlays live (unsaved) member hashes on cached
-  // disk hashes so per-file dirty dots track the editor without re-hashing
-  // the whole container each frame.
-  mcdf::Manifest manifest;
-  bool has_manifest = false;
-  std::string container_hash;  // sha256 of manifest.json as stored
-  std::string verify_summary;  // last engine verify_manifest result
-  bool verify_ok = false;
-  int disk_rev = 0;   // bumped whenever the working copy changes on disk
-  int props_rev = 0;  // bumped on metadata/schema form edits
-  int mh_disk_rev = -1;  // disk_rev the disk hashes were computed at
-  int mh_props_rev = -1;
-  std::size_t mh_undo = static_cast<std::size_t>(-1);
-  std::unordered_map<std::string, std::string> cur_hash;  // member -> current hash
-  std::vector<std::string> extra_files;  // on disk but not listed in the manifest
-
-  // E4: signature checks over the working copy (verify_container), re-run
-  // when the disk state changes.
-  std::vector<mcdf::SignatureCheck> sigs;
-  int sig_disk_rev = -1;
-
-  // E6: encryption state. `policy` mirrors encryption/policy.yaml when
-  // present; staging lists feed encrypt_container.
-  std::optional<mcdf::EncryptionPolicy> policy;
-  bool content_encrypted = false;          // content.md is ciphertext on disk
-  std::vector<std::string> enc_recipients; // staged recipient DIDs
-  std::vector<std::string> enc_files{"content.md"};  // staged file selection
-
-  // E6: audit timeline + chain/checkpoint status, cached per disk state.
-  std::vector<mcdf::AuditEntry> audit;
-  mcdf::AuditVerification audit_chain;
-  mcdf::CheckpointResult audit_cp;
-  int audit_disk_rev = -1;
-
-  // E7: conformance reports (one per profile), cached per disk state.
-  std::vector<mcdf::ValidationReport> conf_reports;
-  int conf_disk_rev = -1;
-
   std::unique_ptr<TextEditor> editor;
-  std::size_t saved_undo = 0;
-  fs::path workdir;
-  bool workdir_is_temp = false;
-  std::string archive_path;  // .mcdf to save back to (empty in folder mode)
+  std::size_t saved_undo = 0;  // editor undo index at the last save
+
+  bool props_dirty = false;  // unsaved metadata/schema form edits
+  int props_rev = 0;         // bumped on metadata/schema form edits
+
+  // Live outline of the editor buffer (UI-side cache).
+  std::vector<mcdf::Heading> outline;
+  std::vector<int> outline_lines;  // 0-based editor line per entry (-1 unknown)
+  std::size_t outline_undo = static_cast<std::size_t>(-1);
+
+  // Cache keys for the manifest live-hash overlays.
+  std::size_t mh_undo = static_cast<std::size_t>(-1);
+  int mh_props_rev = -1;
+
+  // Encryption staging (fed to studio::encrypt_document).
+  std::vector<std::string> enc_recipients;
+  std::vector<std::string> enc_files{"content.md"};
 };
+
+// Core types/ops used unqualified throughout the UI code.
+using studio::DriftCounts;
+using studio::EncKeyEntry;
+using studio::SigningKey;
+using studio::iso8601_now_utc;
+using studio::manifest_drift;
+using studio::refresh_audit;
+using studio::refresh_conformance;
+using studio::refresh_signatures;
+using studio::remove_signature;
+using studio::run_verify;
 
 // imgui_md subclass: image textures + a visible link color. get_image resolves
 // against g_render_workdir (the document currently being previewed).
@@ -188,29 +158,11 @@ bool g_show_audit = false;
 bool g_show_conformance = false;
 bool g_show_container = false;
 
-// E4: the signing keystore. PEM keys live in config_dir()/keys; external PEMs
-// can be loaded in place. App-level state - one selected key signs any document.
-struct SigningKey {
-  std::string name;  // display name (file stem)
-  std::string path;  // PEM file path
-  std::string did;   // did:key of the public half
-  std::string alg;   // "EdDSA" | "ES256"
-  std::optional<mcdf::PrivateKey> key;
-};
-std::vector<SigningKey> g_keys;
-int g_key_idx = -1;
+// The signing + HPKE keystore (PEMs in config_dir()/keys). App-level state -
+// one selected key signs/decrypts for any document.
+studio::Keystore g_ks;
 std::string g_saved_key_path;      // from preferences: reselect on start
 std::string g_sig_name = "author"; // signatures/<name>.sig
-
-// E6: X25519 (HPKE) decryption keys, scanned from the same keystore dir.
-struct EncKeyEntry {
-  std::string name;
-  std::string path;
-  std::string did;  // did:key of the public half (the recipient id)
-  std::optional<mcdf::EncPrivateKey> key;
-};
-std::vector<EncKeyEntry> g_enc_keys;
-int g_enc_key_idx = -1;
 
 bool g_quit = false;
 GLFWwindow* g_window = nullptr;
@@ -545,8 +497,8 @@ void save_preferences(GLFWwindow* w) {
   f << "panel_conformance=" << (g_show_conformance ? 1 : 0) << '\n';
   f << "panel_container=" << (g_show_container ? 1 : 0) << '\n';
   f << "signing_key="
-    << (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size())
-            ? g_keys[g_key_idx].path
+    << (g_ks.key_idx >= 0 && g_ks.key_idx < static_cast<int>(g_ks.keys.size())
+            ? g_ks.keys[g_ks.key_idx].path
             : g_saved_key_path)
     << '\n';
   f << "wallpaper=" << g_prefs.wallpaper_path << '\n';
@@ -736,124 +688,21 @@ void apply_theme(int t) {
   set_native_dark_titlebar(t != 1);
 }
 
-// ---- filesystem helpers --------------------------------------------------------
+// ---- signing keystore (thin wrappers over studio::) ----------------------------
 
-std::string read_file_bytes(const std::string& path, bool& ok) {
-  std::ifstream in(path, std::ios::binary);
-  ok = static_cast<bool>(in);
-  if (!ok) return {};
-  return std::string((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
+void init_keystore() {
+  g_ks.dir = config_dir() / "keys";
+  studio::scan_keys(g_ks);
+  if (!g_saved_key_path.empty())
+    studio::add_key_from_file(g_ks, g_saved_key_path, true);
 }
 
-bool write_file_bytes(const std::string& path, std::string_view bytes) {
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) return false;
-  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-  return static_cast<bool>(out);
-}
-
-fs::path make_workdir() {
-  static int counter = 0;
-  std::error_code ec;
-  const fs::path dir = fs::temp_directory_path(ec) / "mcdf-studio" /
-                       ("work-" + std::to_string(++counter));
-  fs::remove_all(dir, ec);
-  fs::create_directories(dir, ec);
-  return dir;
-}
-
-// ---- signing keystore ----------------------------------------------------------
-
-fs::path keys_dir() {
-  std::error_code ec;
-  const fs::path dir = config_dir() / "keys";
-  fs::create_directories(dir, ec);
-  return dir;
-}
-
-// Loads a PEM and adds it to the right keystore list (deduped by path):
-// Ed25519/P-256 -> signing keys, X25519 -> HPKE decryption keys.
 bool add_key_from_file(const std::string& path, bool select) {
-  for (int i = 0; i < static_cast<int>(g_keys.size()); ++i) {
-    if (g_keys[i].path == path) {
-      if (select) g_key_idx = i;
-      return true;
-    }
-  }
-  for (int i = 0; i < static_cast<int>(g_enc_keys.size()); ++i) {
-    if (g_enc_keys[i].path == path) {
-      if (select) g_enc_key_idx = i;
-      return true;
-    }
-  }
-  bool ok = false;
-  const std::string pem = read_file_bytes(path, ok);
-  if (!ok) return false;
-  if (auto key = mcdf::PrivateKey::from_pem(pem)) {
-    const std::string alg = key->jws_algorithm();
-    if (!alg.empty()) {
-      auto did = key->did_key();
-      if (!did) return false;
-      g_keys.push_back(
-          {fs::path(path).stem().string(), path, *did, alg, std::move(*key)});
-      if (select || g_key_idx < 0)
-        g_key_idx = static_cast<int>(g_keys.size()) - 1;
-      return true;
-    }
-  }
-  if (auto key = mcdf::EncPrivateKey::from_pem(pem)) {
-    auto did = key->did_key();
-    if (!did) return false;
-    g_enc_keys.push_back(
-        {fs::path(path).stem().string(), path, *did, std::move(*key)});
-    if (select || g_enc_key_idx < 0)
-      g_enc_key_idx = static_cast<int>(g_enc_keys.size()) - 1;
-    return true;
-  }
-  return false;
+  return studio::add_key_from_file(g_ks, path, select);
 }
 
-void scan_keys() {
-  std::error_code ec;
-  for (const auto& e : fs::directory_iterator(keys_dir(), ec)) {
-    if (!e.is_regular_file() || e.path().extension() != ".pem") continue;
-    add_key_from_file(e.path().string(), false);
-  }
-  if (!g_saved_key_path.empty()) add_key_from_file(g_saved_key_path, true);
-}
-
-// First free <prefix>-<n>.pem slot in the keystore.
-fs::path free_key_path(const char* prefix) {
-  std::error_code ec;
-  const fs::path dir = keys_dir();
-  for (int i = 1;; ++i) {
-    fs::path dest = dir / (std::string(prefix) + "-" + std::to_string(i) + ".pem");
-    if (!fs::exists(dest, ec)) return dest;
-  }
-}
-
-// Generates an Ed25519 signing key into the keystore (key-<n>.pem), selects it.
-void generate_signing_key() {
-  auto key = mcdf::PrivateKey::generate_ed25519();
-  if (!key) return;
-  auto pem = key->to_pem();
-  if (!pem) return;
-  const fs::path dest = free_key_path("key");
-  if (!write_file_bytes(dest.string(), *pem)) return;
-  add_key_from_file(dest.string(), true);
-}
-
-// Generates an X25519 HPKE key into the keystore (enc-<n>.pem), selects it.
-void generate_enc_key() {
-  auto key = mcdf::EncPrivateKey::generate_x25519();
-  if (!key) return;
-  auto pem = key->to_pem();
-  if (!pem) return;
-  const fs::path dest = free_key_path("enc");
-  if (!write_file_bytes(dest.string(), *pem)) return;
-  add_key_from_file(dest.string(), true);
-}
+void generate_signing_key() { studio::generate_signing_key(g_ks); }
+void generate_enc_key() { studio::generate_enc_key(g_ks); }
 
 // ---- document operations -------------------------------------------------------
 
@@ -869,150 +718,21 @@ Document* new_document() {
   return ptr;
 }
 
-// Re-read manifest.json from the working copy and invalidate the hash caches.
-void reload_manifest(Document& d) {
-  d.manifest = {};
-  d.has_manifest = false;
-  d.container_hash.clear();
-  d.cur_hash.clear();
-  d.extra_files.clear();
-  d.mh_disk_rev = d.mh_props_rev = -1;
-  d.mh_undo = static_cast<std::size_t>(-1);
-  ++d.disk_rev;
-  if (d.workdir.empty()) return;
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) return;
-  if (auto files = (*c)->list()) d.files = *files;  // keep member views fresh
-  if (!(*c)->contains("manifest.json")) return;
-  if (auto raw = (*c)->read("manifest.json")) {
-    if (auto m = mcdf::parse_manifest_json(*raw)) {
-      d.manifest = *m;
-      d.has_manifest = true;
-      d.container_hash = mcdf::sha256_hex(*raw);
-    }
-  }
-}
-
-// Read the container in d.workdir into d + the editor.
-void load_into(Document& d) {
-  auto container = mcdf::open_container(d.workdir);
-  if (!container) {
-    d.status = "open failed: " + container.error().message;
-    d.editor->SetText("");
-    return;
-  }
-  mcdf::Container& c = **container;
-  if (auto files = c.list()) d.files = *files;
-
-  std::string content;
-  if (c.contains("content.md")) {
-    if (auto raw = c.read("content.md")) {
-      content = *raw;
-      d.has_content = true;
-    } else {
-      d.status = "read content.md failed: " + raw.error().message;
-    }
-  }
-  d.meta = {};
-  d.schema = {};
-  d.write_meta = d.write_schema = d.props_dirty = false;
-  if (auto doc = mcdf::load_document(c)) {
-    if (doc->has_metadata) {
-      d.meta = doc->metadata;
-      d.title = doc->metadata.title;
-    }
-    d.write_meta = doc->has_metadata;
-    if (doc->has_schema) {
-      d.schema = doc->schema;
-      d.doc_type = doc->schema.document_type;
-    }
-    d.write_schema = doc->has_schema;
-    d.heading_count = static_cast<int>(doc->headings.size());
-  }
-  d.policy.reset();
-  d.content_encrypted = false;
-  d.enc_recipients.clear();
-  d.enc_files = {"content.md"};
-  if (c.contains("encryption/policy.yaml")) {
-    if (auto raw = c.read("encryption/policy.yaml"))
-      if (auto p = mcdf::parse_encryption_policy_yaml(*raw)) {
-        d.policy = *p;
-        for (const auto& f : p->encrypted_files)
-          if (f == "content.md") d.content_encrypted = true;
-      }
-  }
-  d.editor->SetText(content);
+// Seed the editor from core state after any op that re-read content.md
+// (open, new, save-as repoint, encrypt/decrypt).
+void sync_editor(Document& d) {
+  if (!d.content_reloaded || !d.editor) return;
+  d.content_reloaded = false;
+  d.editor->SetText(d.content);
   // Ciphertext is not editable - decrypt first (Encryption panel).
   d.editor->SetReadOnlyEnabled(d.content_encrypted);
   d.saved_undo = d.editor->GetUndoIndex();
-  d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
-  d.verify_summary.clear();
-  d.verify_ok = false;
-  reload_manifest(d);
-  if (d.status.empty()) d.status = "opened " + d.path;
-}
-
-// Point a document at a .mcdf file: unpack to a fresh temp working copy.
-void set_archive(Document& d, const std::string& path) {
-  std::error_code ec;
-  if (d.workdir_is_temp && !d.workdir.empty()) fs::remove_all(d.workdir, ec);
-  d.path = path;
-  d.is_archive = true;
-  d.archive_path = path;
-  d.files.clear();
-  d.has_content = false;
-  d.title.clear();
-  d.doc_type.clear();
-  d.heading_count = 0;
-  d.meta = {};
-  d.schema = {};
-  d.write_meta = d.write_schema = d.props_dirty = false;
-  d.outline_undo = static_cast<std::size_t>(-1);
-  d.manifest = {};
-  d.has_manifest = false;
-  d.container_hash.clear();
-  d.verify_summary.clear();
-  d.verify_ok = false;
-  d.cur_hash.clear();
-  d.extra_files.clear();
-  d.mh_disk_rev = d.mh_props_rev = -1;
-  d.mh_undo = static_cast<std::size_t>(-1);
-  ++d.disk_rev;
-  d.sigs.clear();
-  d.sig_disk_rev = -1;
-  d.policy.reset();
-  d.content_encrypted = false;
+  d.props_dirty = false;
   d.enc_recipients.clear();
   d.enc_files = {"content.md"};
-  d.audit.clear();
-  d.audit_chain = {};
-  d.audit_cp = {};
-  d.audit_disk_rev = -1;
-  d.conf_reports.clear();
-  d.conf_disk_rev = -1;
-  d.status.clear();
-
-  bool ok = false;
-  const std::string bytes = read_file_bytes(path, ok);
-  if (!ok) {
-    d.workdir.clear();
-    d.workdir_is_temp = false;
-    d.status = "cannot read " + path;
-    d.editor->SetText("");
-    return;
-  }
-  const fs::path work = make_workdir();
-  if (auto un = mcdf::unpack_archive(bytes, work); !un) {
-    fs::remove_all(work, ec);
-    d.workdir.clear();
-    d.workdir_is_temp = false;
-    d.status = "unpack failed: " + un.error().message;
-    d.editor->SetText("");
-    return;
-  }
-  d.workdir = work;
-  d.workdir_is_temp = true;
-  load_into(d);
+  d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
+  d.mh_undo = static_cast<std::size_t>(-1);       // re-apply live hash overlays
+  d.mh_props_rev = -1;
 }
 
 void add_recent(const std::string& path) {
@@ -1023,17 +743,16 @@ void add_recent(const std::string& path) {
 }
 
 void open_archive(const std::string& mcdf_path) {
-  set_archive(*new_document(), mcdf_path);
+  Document* d = new_document();
+  studio::open_archive_into(*d, mcdf_path);
+  sync_editor(*d);
   add_recent(mcdf_path);
 }
 
 void open_folder(const std::string& dir_path) {
   Document* d = new_document();
-  d->path = dir_path;
-  d->is_archive = false;
-  d->workdir = fs::path(dir_path);
-  d->workdir_is_temp = false;
-  load_into(*d);
+  studio::open_folder_into(*d, dir_path);
+  sync_editor(*d);
   add_recent(dir_path);
 }
 
@@ -1044,258 +763,50 @@ void open_path(const std::string& path) {
   else open_archive(path);
 }
 
-// Create a new, empty document backed by a temporary working copy. It stays
-// "untitled" (no path) until the first Save, which opens the Save As dialog.
 void new_blank_document() {
   Document* d = new_document();
-  const fs::path work = make_workdir();
-  if (auto dir = mcdf::DirectoryContainer::open(work))
-    (void)(*dir)->write("content.md", "");
-  // Best-effort: seed a manifest so the first Save yields a well-formed .mcdf.
-  if (auto c = mcdf::open_container(work))
-    if (auto m = mcdf::build_manifest(**c))
-      if (auto j = mcdf::manifest_to_canonical_json(*m))
-        if (auto dir = mcdf::DirectoryContainer::open(work))
-          (void)(*dir)->write("manifest.json", *j);
-  d->workdir = work;
-  d->workdir_is_temp = true;
-  d->is_archive = false;
-  d->archive_path.clear();
-  d->path.clear();  // untitled
-  d->has_content = true;
-  d->editor->SetText("");
-  d->editor->SetReadOnlyEnabled(false);
-  d->saved_undo = d->editor->GetUndoIndex();
-  d->status = "new document - Save to choose a file";
+  studio::init_blank(*d);
+  sync_editor(*d);
 }
 
-// Write the document's editable members (content.md, metadata.yaml,
-// schema.yaml) into a directory and keep its manifest in sync. YAML bytes come
-// from libmcdf's writers so Studio and the CLI emit identical members. With
-// ensure_manifest, manifest.json is created even when absent (Build manifest).
-bool write_members(Document& d, const fs::path& where, std::string& err,
-                   bool ensure_manifest = false) {
-  auto dir = mcdf::DirectoryContainer::open(where);
-  if (!dir) {
-    err = dir.error().message;
-    return false;
-  }
-  // Members encrypted at rest must never be overwritten from the (stale or
-  // ciphertext-holding) UI models - decrypt first.
-  const auto is_encrypted = [&d](std::string_view f) {
-    if (!d.policy) return false;
-    for (const auto& e : d.policy->encrypted_files)
-      if (e == f) return true;
-    return false;
-  };
-  if (!is_encrypted("content.md")) {
-    if (auto w = (*dir)->write("content.md", d.editor->GetText()); !w) {
-      err = w.error().message;
-      return false;
-    }
-  }
-  if (d.write_meta && !is_encrypted("metadata.yaml")) {
-    if (auto w = (*dir)->write("metadata.yaml", mcdf::metadata_to_yaml(d.meta)); !w) {
-      err = w.error().message;
-      return false;
-    }
-  }
-  if (d.write_schema && !is_encrypted("schema.yaml")) {
-    if (auto w = (*dir)->write("schema.yaml", mcdf::schema_to_yaml(d.schema)); !w) {
-      err = w.error().message;
-      return false;
-    }
-  }
-  if (ensure_manifest || (*dir)->contains("manifest.json")) {
-    if (auto container = mcdf::open_container(where))
-      if (auto m = mcdf::build_manifest(**container))
-        if (auto json = mcdf::manifest_to_canonical_json(*m))
-          (void)(*dir)->write("manifest.json", *json);
-  }
-  return true;
-}
-
-bool flush_working_copy(Document& d, bool ensure_manifest = false) {
-  std::string err;
-  if (!write_members(d, d.workdir, err, ensure_manifest)) {
-    d.status = "save failed: " + err;
-    return false;
-  }
-  d.props_dirty = false;
-  reload_manifest(d);  // manifest.json was rewritten; refresh the panel state
-  return true;
-}
-
-// Manifest panel actions. Rebuild writes the live members (editor buffer +
-// forms) to the working copy and rebuilds manifest.json there - it does NOT
-// repack an archive; Save still does that. In folder mode the flush *is* the
-// save, so the editor's saved state advances too.
+// Manifest/Trust actions: thin wrappers passing the live editor buffer into
+// the core, then advancing this window's save bookkeeping. In folder mode a
+// flush *is* the save, so the editor's saved state advances too.
 void rebuild_manifest(Document& d) {
-  if (!d.editor || d.workdir.empty()) return;
-  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
+  if (!d.editor) return;
+  if (!studio::rebuild_manifest(d, d.editor->GetText())) return;
+  d.props_dirty = false;
   if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
-  d.verify_summary.clear();
-  d.status = d.is_archive ? "manifest rebuilt (Save to write the .mcdf)"
-                          : "manifest rebuilt";
 }
 
-// Engine-authoritative check of the working copy on disk (unsaved editor
-// edits are not included - that is what the live dots show).
-void run_verify(Document& d) {
-  d.verify_ok = false;
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) {
-    d.verify_summary = "verify failed: " + c.error().message;
-    return;
-  }
-  auto v = mcdf::verify_manifest(**c, d.manifest);
-  if (!v) {
-    d.verify_summary = "verify failed: " + v.error().message;
-    return;
-  }
-  if (v->ok) {
-    d.verify_ok = true;
-    d.verify_summary =
-        "OK - " + std::to_string(d.manifest.files.size()) + " file(s) match";
-  } else {
-    std::string s;
-    const auto part = [&s](std::size_t n, const char* what) {
-      if (!n) return;
-      if (!s.empty()) s += ", ";
-      s += std::to_string(n) + " " + what;
-    };
-    part(v->mismatched.size(), "mismatched");
-    part(v->missing.size(), "missing");
-    part(v->extra.size(), "unlisted");
-    d.verify_summary = "FAILED - " + s;
-  }
-}
-
-// Re-run verify_container when the working copy changed on disk. Each
-// signatures/*.sig is checked against the canonical manifest; the algorithm
-// allow-list (EdDSA only) is enforced by the engine and surfaces as an error.
-void refresh_signatures(Document& d) {
-  if (d.sig_disk_rev == d.disk_rev) return;
-  d.sig_disk_rev = d.disk_rev;
-  d.sigs.clear();
-  if (d.workdir.empty()) return;
-  if (auto c = mcdf::open_container(d.workdir))
-    if (auto checks = mcdf::verify_container(**c)) d.sigs = std::move(*checks);
-}
-
-// Sign the canonical manifest with the selected key -> signatures/<name>.sig.
-// Mirrors the CLI: members are flushed and the manifest rebuilt first so the
-// signature always covers what the user sees.
 void sign_document(Document& d) {
-  if (g_key_idx < 0 || g_key_idx >= static_cast<int>(g_keys.size())) return;
-  const SigningKey& k = g_keys[g_key_idx];
-  if (!k.key || !d.editor || d.workdir.empty()) return;
-
-  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
+  const SigningKey* k = studio::selected_signing_key(g_ks);
+  if (!k || !d.editor) return;
+  if (!studio::sign_document(d, d.editor->GetText(), *k, g_sig_name)) return;
+  d.props_dirty = false;
   if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
-
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) {
-    d.status = "sign failed: " + c.error().message;
-    return;
-  }
-  auto jws = mcdf::sign_container(**c, *k.key, k.did);
-  if (!jws) {
-    d.status = "sign failed: " + jws.error().message;
-    return;
-  }
-  std::string name;
-  for (char ch : g_sig_name)
-    if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
-      name += ch;
-  if (name.empty()) name = "author";
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) {
-    d.status = "sign failed: " + dir.error().message;
-    return;
-  }
-  const std::string sig_path = "signatures/" + name + ".sig";
-  if (auto w = (*dir)->write(sig_path, *jws); !w) {
-    d.status = "sign failed: " + w.error().message;
-    return;
-  }
-  reload_manifest(d);  // new signature on disk -> refresh members + re-verify
-  d.verify_summary.clear();
-  d.status = "signed by " + k.did + " -> " + sig_path +
-             (d.is_archive ? " (Save to write the .mcdf)" : "");
-}
-
-void remove_signature(Document& d, const std::string& file) {
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) return;
-  if (auto r = (*dir)->remove(file); !r) {
-    d.status = "remove failed: " + r.error().message;
-    return;
-  }
-  reload_manifest(d);
-  d.status = "removed " + file;
 }
 
 void open_save_as_dialog();  // fwd: an untitled document's first Save opens it
 
 void save(Document& d) {
-  if (!d.editor || d.workdir.empty()) return;
-  if (d.path.empty()) {  // untitled (new) document: first save chooses a file
+  if (!d.editor) return;
+  const studio::SaveResult r = studio::save(d, d.editor->GetText());
+  if (r == studio::SaveResult::kNeedsPath) {  // untitled: choose a file first
     g_active = &d;
     open_save_as_dialog();
     return;
   }
-  if (!flush_working_copy(d)) return;
-
-  if (d.is_archive && !d.archive_path.empty()) {
-    auto container = mcdf::open_container(d.workdir);
-    if (!container) {
-      d.status = "save failed: " + container.error().message;
-      return;
-    }
-    auto archive = mcdf::pack_container(**container);
-    if (!archive) {
-      d.status = "save failed: " + archive.error().message;
-      return;
-    }
-    if (!write_file_bytes(d.archive_path, *archive)) {
-      d.status = "save failed: cannot write " + d.archive_path;
-      return;
-    }
-    d.status = "saved " + d.archive_path + " (" + std::to_string(archive->size()) + " bytes)";
-  } else {
-    d.status = "saved content.md";
+  if (r == studio::SaveResult::kSaved) {
+    d.saved_undo = d.editor->GetUndoIndex();
+    d.props_dirty = false;
   }
-  d.saved_undo = d.editor->GetUndoIndex();
 }
 
 void save_as(Document& d, std::string path) {
-  if (!d.editor || d.workdir.empty()) return;
-  if (path.size() < 5 || path.substr(path.size() - 5) != ".mcdf") path += ".mcdf";
-
-  // Stage into a temp copy: in folder mode d.workdir is the user's real
-  // folder, which Save As must not modify.
-  std::error_code ec;
-  const fs::path tmp = make_workdir();
-  fs::copy(d.workdir, tmp,
-           fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-  std::string err;
-  if (!write_members(d, tmp, err)) {
-    fs::remove_all(tmp, ec);
-    d.status = "save-as failed: " + err;
-    return;
-  }
-  bool ok = false;
-  if (auto c = mcdf::open_container(tmp))
-    if (auto archive = mcdf::pack_container(**c))
-      ok = write_file_bytes(path, *archive);
-  fs::remove_all(tmp, ec);
-
-  if (!ok) {
-    d.status = "save-as failed: " + path;
-    return;
-  }
-  set_archive(d, path);  // this document now points at the new .mcdf
+  if (!d.editor) return;
+  if (studio::save_as(d, d.editor->GetText(), std::move(path)))
+    sync_editor(d);  // the document now points at the new .mcdf
 }
 
 void insert_image(Document& d, const std::string& src) {
@@ -1327,12 +838,7 @@ void insert_image(Document& d, const std::string& src) {
   d.status = "inserted " + rel;
 }
 
-void close_document(Document& d) {
-  if (d.workdir_is_temp && !d.workdir.empty()) {
-    std::error_code ec;
-    fs::remove_all(d.workdir, ec);
-  }
-}
+void close_document(Document& d) { studio::cleanup(d); }
 
 // ---- dialogs -------------------------------------------------------------------
 
@@ -1646,19 +1152,6 @@ bool input_text(const char* label, std::string& value) {
   return false;
 }
 
-std::string iso8601_now_utc() {
-  const std::time_t t = std::time(nullptr);
-  std::tm tm{};
-#if defined(_WIN32)
-  gmtime_s(&tm, &t);
-#else
-  gmtime_r(&t, &tm);
-#endif
-  char buf[32];
-  std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
-  return buf;
-}
-
 void jump_to_heading(Document& d, std::size_t idx) {
   if (!d.editor || idx >= d.outline_lines.size()) return;
   const int line = d.outline_lines[idx];
@@ -1673,144 +1166,34 @@ Document* panel_target() {
   return (g_active && g_active->has_content) ? g_active : nullptr;
 }
 
-// ---- E5-E7 operations ----------------------------------------------------------
+// ---- E5-E7 operations (thin wrappers over studio::) ----------------------------
 
-// Encrypt the staged files for the staged recipients (AES-256-GCM + HPKE),
-// then reload from disk: content becomes ciphertext and the editor locks.
 void encrypt_document(Document& d) {
-  if (d.enc_recipients.empty()) {
-    d.status = "encrypt: add at least one recipient DID";
-    return;
-  }
-  std::vector<mcdf::EncPublicKey> recipients;
-  for (const auto& did : d.enc_recipients) {
-    auto pk = mcdf::EncPublicKey::from_did_key(did);
-    if (!pk) {
-      d.status = "encrypt failed: " + pk.error().message;
-      return;
-    }
-    recipients.push_back(*pk);
-  }
-  if (!flush_working_copy(d, /*ensure_manifest=*/true)) return;
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) {
-    d.status = "encrypt failed: " + dir.error().message;
-    return;
-  }
-  std::vector<std::string> files = d.enc_files;
-  if (files.empty()) files.push_back("content.md");
-  if (auto r = mcdf::encrypt_container(**dir, files, recipients); !r) {
-    d.status = "encrypt failed: " + r.error().message;
-    return;
-  }
-  const std::string note = d.is_archive ? " (Save to write the .mcdf)" : "";
-  load_into(d);  // re-read: ciphertext on disk, policy present, editor locked
-  d.status = "encrypted " + std::to_string(files.size()) + " file(s) for " +
-             std::to_string(recipients.size()) + " recipient(s)" + note;
+  if (!d.editor) return;
+  if (studio::encrypt_document(d, d.editor->GetText(), d.enc_recipients,
+                               d.enc_files))
+    sync_editor(d);  // ciphertext on disk, policy present, editor locks
 }
 
-// Decrypt with the selected X25519 key and reload (plaintext, editable again).
 void decrypt_document(Document& d) {
-  if (g_enc_key_idx < 0 || g_enc_key_idx >= static_cast<int>(g_enc_keys.size()))
-    return;
-  const EncKeyEntry& k = g_enc_keys[g_enc_key_idx];
-  if (!k.key) return;
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) {
-    d.status = "decrypt failed: " + dir.error().message;
-    return;
-  }
-  if (auto r = mcdf::decrypt_container(**dir, *k.key); !r) {
-    d.status = "decrypt failed: " + r.error().message;
-    return;
-  }
-  const std::string note = d.is_archive ? " (Save to write the .mcdf)" : "";
-  load_into(d);
-  d.status = "decrypted" + note;
-}
-
-// Audit timeline + chain/checkpoint status, re-read when the disk changed.
-void refresh_audit(Document& d) {
-  if (d.audit_disk_rev == d.disk_rev) return;
-  d.audit_disk_rev = d.disk_rev;
-  d.audit.clear();
-  d.audit_chain = {};
-  d.audit_cp = {};
-  if (d.workdir.empty()) return;
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) return;
-  if (auto e = mcdf::read_audit_log(**c)) d.audit = std::move(*e);
-  if (auto v = mcdf::audit_verify(**c)) d.audit_chain = *v;
-  if (auto cp = mcdf::audit_verify_checkpoint(**c)) d.audit_cp = *cp;
+  const EncKeyEntry* k = studio::selected_enc_key(g_ks);
+  if (!k) return;
+  if (studio::decrypt_document(d, *k)) sync_editor(d);
 }
 
 void audit_append_entry(Document& d, const std::string& action) {
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) return;
-  const std::string actor =
-      (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()))
-          ? g_keys[g_key_idx].did
-          : "mcdf-studio";
-  if (auto r = mcdf::audit_append(**dir, action, actor, iso8601_now_utc()); !r) {
-    d.status = "audit append failed: " + r.error().message;
-    return;
-  }
-  reload_manifest(d);
-  d.status = "audit: appended " + action;
+  const SigningKey* k = studio::selected_signing_key(g_ks);
+  studio::audit_append_entry(d, action, k ? k->did : "mcdf-studio");
 }
 
 void audit_make_checkpoint(Document& d) {
-  if (g_key_idx < 0 || g_key_idx >= static_cast<int>(g_keys.size())) return;
-  const SigningKey& k = g_keys[g_key_idx];
-  if (!k.key) return;
-  auto dir = mcdf::DirectoryContainer::open(d.workdir);
-  if (!dir) return;
-  if (auto r = mcdf::audit_checkpoint(**dir, *k.key, k.did); !r) {
-    d.status = "checkpoint failed: " + r.error().message;
-    return;
-  }
-  reload_manifest(d);
-  d.status = "audit checkpoint signed by " + k.did;
+  const SigningKey* k = studio::selected_signing_key(g_ks);
+  if (k) studio::audit_make_checkpoint(d, *k);
 }
 
-// Conformance reports over the working copy, one per profile.
-void refresh_conformance(Document& d) {
-  if (d.conf_disk_rev == d.disk_rev) return;
-  d.conf_disk_rev = d.disk_rev;
-  d.conf_reports.clear();
-  if (d.workdir.empty()) return;
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) return;
-  auto doc = mcdf::load_document(**c);
-  if (!doc) return;
-  using P = mcdf::Profile;
-  for (P p : {P::kCore, P::kIntegrity, P::kSigned, P::kEncrypted, P::kRender})
-    if (auto r = mcdf::validate(**c, *doc, p)) d.conf_reports.push_back(*r);
-}
-
-// Canonical, engine-produced render (deterministic; carries the provenance
-// stamp). The live preview is an approximation - this is what ships.
 void export_render(Document& d, mcdf::RenderFormat fmt, std::string path) {
-  if (!flush_working_copy(d)) return;  // render what the user sees
-  auto c = mcdf::open_container(d.workdir);
-  if (!c) {
-    d.status = "render failed: " + c.error().message;
-    return;
-  }
-  auto out = mcdf::render(**c, fmt);
-  if (!out) {
-    d.status = "render failed: " + out.error().message;
-    return;
-  }
-  const std::string ext = fmt == mcdf::RenderFormat::kHtml ? ".html" : ".txt";
-  if (path.size() < ext.size() ||
-      path.compare(path.size() - ext.size(), ext.size(), ext) != 0)
-    path += ext;
-  if (!write_file_bytes(path, *out)) {
-    d.status = "render failed: cannot write " + path;
-    return;
-  }
-  d.status = "canonical render -> " + path;
+  if (d.editor)
+    studio::export_render(d, d.editor->GetText(), fmt, std::move(path));
 }
 
 // Outline of the live editor buffer + schema sections with their binding
@@ -2032,63 +1415,24 @@ void draw_schema_panel() {
   ImGui::End();
 }
 
-// Refresh the per-member current-hash view. Disk members are hashed only when
-// the working copy changed (disk_rev); content.md re-hashes from the editor
-// buffer per edit and metadata/schema from the form models per form edit -
-// the "what changed -> what must be re-hashed" story, computed incrementally.
+// Refresh the per-member current-hash view: disk members once per working-copy
+// change (core), content.md from the editor buffer per edit, metadata/schema
+// from the form models per form edit - the "what changed -> what must be
+// re-hashed" story, computed incrementally.
 void refresh_manifest_view(Document& d) {
   if (!d.has_manifest || !d.editor) return;
-  const std::string alg =
-      d.manifest.hash_algorithm.empty() ? "sha256" : d.manifest.hash_algorithm;
-  if (d.mh_disk_rev != d.disk_rev) {
-    d.mh_disk_rev = d.disk_rev;
-    d.cur_hash.clear();
-    d.extra_files.clear();
+  if (studio::refresh_disk_hashes(d)) {
     d.mh_undo = static_cast<std::size_t>(-1);  // re-apply the live overlays
     d.mh_props_rev = -1;
-    if (auto c = mcdf::open_container(d.workdir)) {
-      if (auto files = (*c)->list()) {
-        for (const auto& f : *files) {
-          if (mcdf::is_manifest_excluded(f)) continue;
-          if (auto raw = (*c)->read(f))
-            if (auto h = mcdf::hash_hex(alg, *raw)) d.cur_hash[f] = *h;
-          if (!d.manifest.files.contains(f)) d.extra_files.push_back(f);
-        }
-      }
-    }
   }
   if (const std::size_t undo = d.editor->GetUndoIndex(); undo != d.mh_undo) {
     d.mh_undo = undo;
-    if (auto h = mcdf::hash_hex(alg, d.editor->GetText()))
-      d.cur_hash["content.md"] = *h;
+    studio::update_live_content_hash(d, d.editor->GetText());
   }
   if (d.mh_props_rev != d.props_rev) {
     d.mh_props_rev = d.props_rev;
-    if (d.write_meta)
-      if (auto h = mcdf::hash_hex(alg, mcdf::metadata_to_yaml(d.meta)))
-        d.cur_hash["metadata.yaml"] = *h;
-    if (d.write_schema)
-      if (auto h = mcdf::hash_hex(alg, mcdf::schema_to_yaml(d.schema)))
-        d.cur_hash["schema.yaml"] = *h;
+    studio::update_live_props_hash(d);
   }
-}
-
-// Live divergence between the manifest and the document as the user sees it
-// (call refresh_manifest_view first).
-struct DriftCounts {
-  int modified = 0, missing = 0, extra = 0;
-  bool any() const { return modified || missing || extra; }
-};
-
-DriftCounts manifest_drift(const Document& d) {
-  DriftCounts c;
-  for (const auto& [path, hash] : d.manifest.files) {
-    const auto it = d.cur_hash.find(path);
-    if (it == d.cur_hash.end()) ++c.missing;
-    else if (it->second != hash) ++c.modified;
-  }
-  c.extra = static_cast<int>(d.extra_files.size());
-  return c;
 }
 
 // The integrity showcase: file -> hash table with live dirty dots, container
@@ -2216,14 +1560,14 @@ void draw_trust_panel() {
   if (ImGui::Begin(ICON_FA_SHIELD_HALVED "  Trust###Trust", &g_show_trust)) {
     ImGui::SeparatorText(ICON_FA_KEY "  Signing key");
     const char* sel_label =
-        (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()))
-            ? g_keys[g_key_idx].name.c_str()
+        (g_ks.key_idx >= 0 && g_ks.key_idx < static_cast<int>(g_ks.keys.size()))
+            ? g_ks.keys[g_ks.key_idx].name.c_str()
             : "(no key)";
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
     if (ImGui::BeginCombo("##key", sel_label)) {
-      for (int i = 0; i < static_cast<int>(g_keys.size()); ++i) {
-        const std::string item = g_keys[i].name + "  (" + g_keys[i].alg + ")";
-        if (ImGui::Selectable(item.c_str(), i == g_key_idx)) g_key_idx = i;
+      for (int i = 0; i < static_cast<int>(g_ks.keys.size()); ++i) {
+        const std::string item = g_ks.keys[i].name + "  (" + g_ks.keys[i].alg + ")";
+        if (ImGui::Selectable(item.c_str(), i == g_ks.key_idx)) g_ks.key_idx = i;
       }
       ImGui::EndCombo();
     }
@@ -2231,12 +1575,12 @@ void draw_trust_panel() {
     if (ImGui::Button(ICON_FA_PLUS "  Generate")) generate_signing_key();
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("Generate an Ed25519 key into the keystore\n(%s)",
-                        keys_dir().string().c_str());
+                        g_ks.dir.string().c_str());
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Load PEM..."))
       open_load_key_dialog();
-    if (g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size())) {
-      const SigningKey& k = g_keys[g_key_idx];
+    if (g_ks.key_idx >= 0 && g_ks.key_idx < static_cast<int>(g_ks.keys.size())) {
+      const SigningKey& k = g_ks.keys[g_ks.key_idx];
       ImGui::TextDisabled(ICON_FA_FINGERPRINT "  %.32s...", k.did.c_str());
       if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s\nClick to copy", k.did.c_str());
@@ -2316,8 +1660,8 @@ void draw_trust_panel() {
       }
       ImGui::SameLine();
       const bool can_sign =
-          g_key_idx >= 0 && g_key_idx < static_cast<int>(g_keys.size()) &&
-          g_keys[g_key_idx].key.has_value();
+          g_ks.key_idx >= 0 && g_ks.key_idx < static_cast<int>(g_ks.keys.size()) &&
+          g_ks.keys[g_ks.key_idx].key.has_value();
       ImGui::BeginDisabled(!can_sign);
       if (ImGui::Button(ICON_FA_PEN_NIB "  Sign")) sign_document(d);
       ImGui::EndDisabled();
@@ -2341,14 +1685,14 @@ void draw_encryption_panel() {
   if (ImGui::Begin(ICON_FA_LOCK "  Encryption###Encryption", &g_show_encryption)) {
     ImGui::SeparatorText(ICON_FA_KEY "  My decryption key (X25519)");
     const char* sel =
-        (g_enc_key_idx >= 0 && g_enc_key_idx < static_cast<int>(g_enc_keys.size()))
-            ? g_enc_keys[g_enc_key_idx].name.c_str()
+        (g_ks.enc_key_idx >= 0 && g_ks.enc_key_idx < static_cast<int>(g_ks.enc_keys.size()))
+            ? g_ks.enc_keys[g_ks.enc_key_idx].name.c_str()
             : "(no key)";
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
     if (ImGui::BeginCombo("##enckey", sel)) {
-      for (int i = 0; i < static_cast<int>(g_enc_keys.size()); ++i)
-        if (ImGui::Selectable(g_enc_keys[i].name.c_str(), i == g_enc_key_idx))
-          g_enc_key_idx = i;
+      for (int i = 0; i < static_cast<int>(g_ks.enc_keys.size()); ++i)
+        if (ImGui::Selectable(g_ks.enc_keys[i].name.c_str(), i == g_ks.enc_key_idx))
+          g_ks.enc_key_idx = i;
       ImGui::EndCombo();
     }
     ImGui::SameLine();
@@ -2356,8 +1700,8 @@ void draw_encryption_panel() {
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Load PEM..."))
       open_load_key_dialog();
-    if (g_enc_key_idx >= 0 && g_enc_key_idx < static_cast<int>(g_enc_keys.size())) {
-      const EncKeyEntry& k = g_enc_keys[g_enc_key_idx];
+    if (g_ks.enc_key_idx >= 0 && g_ks.enc_key_idx < static_cast<int>(g_ks.enc_keys.size())) {
+      const EncKeyEntry& k = g_ks.enc_keys[g_ks.enc_key_idx];
       ImGui::TextDisabled(ICON_FA_FINGERPRINT "  %.32s...", k.did.c_str());
       if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s\nThis DID is what others encrypt to.\nClick to copy",
@@ -2390,9 +1734,9 @@ void draw_encryption_panel() {
       }
       ImGui::Spacing();
       const bool can_dec =
-          g_enc_key_idx >= 0 &&
-          g_enc_key_idx < static_cast<int>(g_enc_keys.size()) &&
-          g_enc_keys[g_enc_key_idx].key.has_value();
+          g_ks.enc_key_idx >= 0 &&
+          g_ks.enc_key_idx < static_cast<int>(g_ks.enc_keys.size()) &&
+          g_ks.enc_keys[g_ks.enc_key_idx].key.has_value();
       ImGui::BeginDisabled(!can_dec);
       if (ImGui::Button(ICON_FA_UNLOCK "  Decrypt")) decrypt_document(d);
       ImGui::EndDisabled();
@@ -2440,11 +1784,11 @@ void draw_encryption_panel() {
       }
       ImGui::SameLine();
       const bool have_my =
-          g_enc_key_idx >= 0 &&
-          g_enc_key_idx < static_cast<int>(g_enc_keys.size());
+          g_ks.enc_key_idx >= 0 &&
+          g_ks.enc_key_idx < static_cast<int>(g_ks.enc_keys.size());
       ImGui::BeginDisabled(!have_my);
       if (ImGui::Button(ICON_FA_USER_SHIELD "  My key"))
-        d.enc_recipients.push_back(g_enc_keys[g_enc_key_idx].did);
+        d.enc_recipients.push_back(g_ks.enc_keys[g_ks.enc_key_idx].did);
       ImGui::EndDisabled();
       ImGui::Spacing();
       ImGui::BeginDisabled(d.enc_recipients.empty());
@@ -2530,9 +1874,9 @@ void draw_audit_panel() {
         ImGui::SetTooltip("Append a hash-chained entry\n(actor = the selected "
                           "signing key's DID)");
       ImGui::SameLine();
-      const bool can_cp = g_key_idx >= 0 &&
-                          g_key_idx < static_cast<int>(g_keys.size()) &&
-                          g_keys[g_key_idx].key.has_value() && !d.audit.empty();
+      const bool can_cp = g_ks.key_idx >= 0 &&
+                          g_ks.key_idx < static_cast<int>(g_ks.keys.size()) &&
+                          g_ks.keys[g_ks.key_idx].key.has_value() && !d.audit.empty();
       ImGui::BeginDisabled(!can_cp);
       if (ImGui::Button(ICON_FA_STAMP "  Checkpoint")) audit_make_checkpoint(d);
       ImGui::EndDisabled();
@@ -2884,7 +2228,7 @@ int main() {
   if (!glfwInit()) return 1;
 
   load_preferences();
-  scan_keys();
+  init_keystore();
 
 #if defined(__APPLE__)
   const char* glsl_version = "#version 150";

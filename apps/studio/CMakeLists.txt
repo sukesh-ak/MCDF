@@ -20,11 +20,20 @@ add_subdirectory(include/imfiledialog)
 add_subdirectory(third_party/ImGuiColorTextEdit)
 add_subdirectory(third_party/imgui_md)
 
+# Studio's document engine: every op the app performs, with no GUI dependency,
+# so it can be driven headlessly by mcdf-studio-tests (plan 04 §10).
+add_library(mcdf-studio-core STATIC core/studio_core.cpp)
+add_library(mcdf::studio_core ALIAS mcdf-studio-core)
+target_compile_features(mcdf-studio-core PUBLIC cxx_std_23)
+target_include_directories(mcdf-studio-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(mcdf-studio-core PUBLIC mcdf::mcdf)
+
 add_executable(mcdf-studio main.cpp)
 set_target_properties(mcdf-studio PROPERTIES OUTPUT_NAME mcdf-studio)
 target_compile_features(mcdf-studio PRIVATE cxx_std_23)
 target_include_directories(mcdf-studio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${Stb_INCLUDE_DIR})  # IconsFontAwesome6.h + stb
 target_link_libraries(mcdf-studio PRIVATE
+  mcdf::studio_core
   mcdf::mcdf
   mcdf::imfd
   mcdf::texteditor
@@ -33,6 +42,15 @@ target_link_libraries(mcdf-studio PRIVATE
   glfw
   OpenGL::GL
 )
+
+# Headless tests over the core: open -> edit -> rebuild -> sign -> verify must
+# match the CLI on the same engine; packed bytes must be CLI-identical.
+if(MCDF_BUILD_TESTS)
+  find_package(doctest CONFIG REQUIRED)
+  add_executable(mcdf-studio-tests tests/test_studio_core.cpp)
+  target_link_libraries(mcdf-studio-tests PRIVATE mcdf::studio_core doctest::doctest)
+  add_test(NAME mcdf-studio-tests COMMAND mcdf-studio-tests)
+endif()
 if(WIN32)
   target_link_libraries(mcdf-studio PRIVATE dwmapi)  # dark native title bar
 endif()
