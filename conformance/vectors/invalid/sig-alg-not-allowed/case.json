@@ -1,0 +1,6 @@
+{
+  "description": "A signature whose JWS alg (RS256) is outside the allow-list (EdDSA, ES256).",
+  "profile": "signed",
+  "expect": "fail",
+  "error": "E_SIG_ALG_NOT_ALLOWED"
+}

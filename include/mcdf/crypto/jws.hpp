@@ -24,7 +24,8 @@ struct JwsVerifyResult {
 };
 
 // Verifies a detached JWS over payload. The verifying key is resolved from the
-// header's `kid` (a did:key). Only alg "EdDSA" is accepted (allow-list).
+// header's `kid` (a did:key). The alg allow-list is "EdDSA" and "ES256", and
+// the resolved key's type must match the header alg (confusion guard).
 Result<JwsVerifyResult> jws_verify_detached(std::string_view compact_jws,
                                             std::string_view payload);
 

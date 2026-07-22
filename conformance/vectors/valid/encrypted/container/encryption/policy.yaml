@@ -1,0 +1,8 @@
+method: aes-256-gcm
+key_management: hpke
+encrypted_files:
+  - content.md
+recipients:
+  - id: did:key:z6LSerLwKkreS9zTk25eKt3eXC32Bm7mqsahk3z6WYHSDFBm
+    enc: RsuLsd-7cjQF5O7rHTARzHWrszGLpG_tWZnacR_4gDI
+    wrapped_key: uP1Tx2EfiDMbl3MOmBN6SGhKQdUOtOK_8TRPndltZD5Dr_D1C7PKKNyb56j-POdi

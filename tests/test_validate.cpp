@@ -142,6 +142,15 @@ TEST_CASE("signed profile requires at least one valid signature") {
   CHECK(t.validate(mcdf::Profile::kSigned).ok);
 }
 
+TEST_CASE("signed profile accepts an ES256 signature") {
+  TempContainer t("es256", "# ES256\n");
+  auto key = mcdf::PrivateKey::generate_ecdsa_p256();
+  REQUIRE(key.has_value());
+  t.sign(*key);
+  auto report = t.validate(mcdf::Profile::kSigned);
+  CHECK(report.ok);
+}
+
 TEST_CASE("signed profile flags a signature broken by a manifest rebuild") {
   TempContainer t("stale-sig", "# v1\n");
   auto key = mcdf::PrivateKey::generate_ed25519();

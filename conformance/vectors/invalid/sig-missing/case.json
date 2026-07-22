@@ -1,0 +1,6 @@
+{
+  "description": "Validating the signed profile with no signatures/*.sig present.",
+  "profile": "signed",
+  "expect": "fail",
+  "error": "E_SIG_MISSING"
+}

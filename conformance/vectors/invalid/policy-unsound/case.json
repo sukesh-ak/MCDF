@@ -1,0 +1,6 @@
+{
+  "description": "encryption/policy.yaml violates the static rules: method off the allow-list, a listed file that does not exist, and an unresolvable recipient id.",
+  "profile": "encrypted",
+  "expect": "fail",
+  "error": "E_POLICY_INVALID"
+}

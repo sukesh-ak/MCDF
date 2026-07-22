@@ -8,7 +8,8 @@
 #   ./run.sh /path/to/my-cli  # score any CLI exposing the MCDF verbs
 #
 # The CLI under test must support:
-#   <cli> validate <container> --profile <core|integrity>   exit 0 = valid
+#   <cli> validate <container> --profile <core|integrity|signed|encrypted|render>
+#                                                           exit 0 = valid
 #   <cli> manifest <container>                              canonical JSON on stdout
 #
 # Dependency-free POSIX sh: no jq, no python.

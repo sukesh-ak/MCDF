@@ -1,0 +1,9 @@
+method: rot13
+key_management: hpke
+encrypted_files:
+  - content.md
+  - ghost.bin
+recipients:
+  - id: not-a-did
+    enc: x
+    wrapped_key: y

@@ -30,7 +30,7 @@ class PrivateKey {
   std::shared_ptr<evp_pkey_st> pkey_;
 };
 
-// An Ed25519 public (verification) key.
+// A public (verification) key: Ed25519 or ECDSA P-256, resolved from did:key.
 class PublicKey {
  public:
   static Result<PublicKey> from_did_key(std::string_view did);
