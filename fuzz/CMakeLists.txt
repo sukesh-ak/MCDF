@@ -7,7 +7,9 @@
 #   - MCDF_FUZZ_ENGINE=ON (Clang): links libFuzzer; build with
 #       CC=clang CXX=clang++ cmake -DMCDF_BUILD_FUZZERS=ON -DMCDF_FUZZ_ENGINE=ON \
 #         -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address" ...
-#     then run e.g.  ./fuzz_unpack -max_total_time=60 ../fuzz/corpus/unpack
+#     then run e.g.  ./fuzz_unpack -max_total_time=60 /tmp/scratch ../fuzz/corpus/unpack
+#     (the FIRST corpus dir is writable output - pass a scratch dir so the
+#     committed seeds stay read-only)
 #   - default (any toolchain): standalone binaries that replay file arguments
 #     (the committed corpus) - a compile check + regression runner.
 

@@ -156,9 +156,12 @@ jobs:
       - name: Fuzz (30s per target, seeded)
         env:
           ASAN_OPTIONS: detect_leaks=0  # OpenSSL init tables trip LSan
+        # First corpus dir is libFuzzer's WRITABLE output; keep the committed
+        # seeds read-only by passing a scratch dir first.
         run: |
           for t in unpack parsers markdown; do
-            ./build/fuzz/fuzz_$t -max_total_time=30 -print_final_stats=1 fuzz/corpus/$t
+            mkdir -p /tmp/corpus-$t
+            ./build/fuzz/fuzz_$t -max_total_time=30 -print_final_stats=1 /tmp/corpus-$t fuzz/corpus/$t
           done
 
   # The reproducible Linux build, exactly as a contributor would run it.
