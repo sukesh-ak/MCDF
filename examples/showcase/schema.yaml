@@ -1,0 +1,23 @@
+document_type: showcase
+sections:
+  - id: overview
+    title: "The MCDF Showcase"
+    required: true
+  - id: structure
+    title: "Structure that binds"
+    required: true
+  - id: integrity
+    title: "Integrity you can see"
+    required: true
+  - id: trust
+    title: "Trust that breaks loudly"
+    required: true
+  - id: confidentiality
+    title: "Confidentiality when you need it"
+    required: false
+  - id: audit
+    title: "History that cannot be rewritten"
+    required: true
+  - id: viewing
+    title: "Viewing and shipping"
+    required: false

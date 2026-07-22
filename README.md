@@ -23,11 +23,23 @@ Actively developed. The C++ runtime implements the full document pipeline — th
 Dear ImGui desktop editor, ships alongside it. Remaining work is hardening —
 additional signature algorithms, fuzzing, and more export targets.
 
+## Try it
+
+A complete, signed sample document lives in [`examples/`](examples/):
+[`showcase.mcdf`](examples/showcase.mcdf) demonstrates every feature —
+structure binding, the integrity manifest, a `did:key` signature, a
+hash-chained audit log, and an embedded image — and
+[`examples/showcase/`](examples/showcase/) is the same document unpacked, so
+you can read every member in your browser: it is just Markdown, YAML, and
+JSON. Open the `.mcdf` in MCDF Studio (or `mcdf inspect` it) and follow the
+[two-minute tamper demo](examples/README.md).
+
 ## Layout
 
 ```
 spec/          the MCDF specification (CSL-1.0)
 conformance/   schemas, test vectors, error taxonomy, runner
+examples/      a complete signed sample document (packed + unpacked)
 include/mcdf/  public library headers
 src/           libmcdf implementation (container, crypto, model, serialize, core)
 apps/          clients built on libmcdf
