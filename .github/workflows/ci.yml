@@ -127,10 +127,18 @@ jobs:
             vcpkg-fuzz-${{ runner.os }}-
             vcpkg-${{ runner.os }}-
 
+      # The runner's stock clang 18 defines __cpp_concepts=201907, which makes
+      # libstdc++ hide std::expected (the library's Result type) - clang 19+
+      # re-landed the 202002 bump. Install clang 20 from apt.llvm.org.
+      - name: Install Clang 20
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 20
+
       - name: Configure (clang + libFuzzer + ASan)
         env:
-          CC: clang
-          CXX: clang++
+          CC: clang-20
+          CXX: clang++-20
         run: |
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
