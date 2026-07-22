@@ -17,11 +17,25 @@ This repository holds the **specification** and the **primary C++ runtime**.
 
 ## Status
 
-Actively developed. The C++ runtime implements the full document pipeline — the
-`mcdf` CLI can `inspect`, `verify`, `sign`, `pack`/`unpack`, `encrypt`/`decrypt`,
-`audit`, and `render` (to sanitized HTML + plain text). **MCDF Studio**, a native
-Dear ImGui desktop editor, ships alongside it. Remaining work is hardening —
-additional signature algorithms, fuzzing, and more export targets.
+Actively developed; prebuilt CLI and Studio binaries for Windows, Linux and
+macOS are on the [releases page](https://github.com/sukesh-ak/MCDF/releases).
+
+The C++ runtime implements the full document pipeline — the `mcdf` CLI can
+`inspect`, `validate` (all five conformance profiles), `verify`, `sign`
+(Ed25519 / ECDSA P-256 via `did:key`), `pack`/`unpack`, `encrypt`/`decrypt`
+(AES-256-GCM + HPKE), `audit`, and `render` (sanitized HTML + plain text with
+a provenance stamp).
+
+**MCDF Studio**, the native desktop editor, shows it all live: edit beside a
+Markdown preview while dockable panels track structure binding, per-file
+integrity, signatures, encryption, the audit chain, and conformance — type
+one character in a signed document and watch the signature break; rebuild and
+re-sign and watch it heal.
+
+Hardening is continuous: unit + determinism tests on three OSes, known-answer
+conformance vectors, and coverage-guided fuzzing (libFuzzer + ASan) over
+every surface that parses untrusted input. Remaining: RSA-PSS, DOCX/PDF
+export, OCI distribution.
 
 ## Try it
 
@@ -45,7 +59,9 @@ src/           libmcdf implementation (container, crypto, model, serialize, core
 apps/          clients built on libmcdf
   cli/           the `mcdf` command-line client
   studio/        MCDF Studio — the Dear ImGui desktop editor
+                 (core/ is its GUI-free document engine, tested headlessly)
 tests/         unit / determinism / conformance tests
+fuzz/          fuzz harnesses + seed corpus for the untrusted-input parsers
 ```
 
 ## Implementing MCDF in another language
