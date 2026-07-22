@@ -109,6 +109,50 @@ jobs:
             build/apps/studio/mcdf-studio
           if-no-files-found: error
 
+  # Coverage-guided fuzzing smoke (M8 hardening): libFuzzer + ASan over the
+  # untrusted-input surfaces (TAR unpack, YAML/JSON member parsers, markdown).
+  # Short seeded runs to catch regressions; longer campaigns are manual.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-fuzz-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-fuzz-${{ runner.os }}-
+            vcpkg-${{ runner.os }}-
+
+      - name: Configure (clang + libFuzzer + ASan)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMCDF_BUILD_TESTS=OFF \
+            -DMCDF_BUILD_FUZZERS=ON \
+            -DMCDF_FUZZ_ENGINE=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address" \
+            -DVCPKG_MANIFEST_FEATURES= \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build fuzzers
+        run: cmake --build build --parallel --target fuzz_unpack fuzz_parsers fuzz_markdown
+
+      - name: Fuzz (30s per target, seeded)
+        env:
+          ASAN_OPTIONS: detect_leaks=0  # OpenSSL init tables trip LSan
+        run: |
+          for t in unpack parsers markdown; do
+            ./build/fuzz/fuzz_$t -max_total_time=30 -print_final_stats=1 fuzz/corpus/$t
+          done
+
   # The reproducible Linux build, exactly as a contributor would run it.
   docker:
     name: docker

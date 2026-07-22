@@ -13,6 +13,11 @@ endif()
 
 option(MCDF_BUILD_TESTS "Build unit tests" ON)
 option(MCDF_BUILD_STUDIO "Build the MCDF Studio GUI editor (Dear ImGui)" OFF)
+option(MCDF_BUILD_FUZZERS "Build the fuzz harnesses (fuzz/)" OFF)
+
+if(MCDF_BUILD_TESTS)
+  enable_testing()
+endif()
 
 # Core library (the engine; no UI).
 add_subdirectory(src)
@@ -20,13 +25,18 @@ add_subdirectory(src)
 # Clients built on the library. Add server/ here as they arrive.
 add_subdirectory(apps/cli)
 
-# MCDF Studio - the Dear ImGui desktop editor. Off by default; needs the vcpkg
-# `studio` feature (-DVCPKG_MANIFEST_FEATURES=studio) for imgui + glfw3.
-if(MCDF_BUILD_STUDIO)
+# MCDF Studio - the Dear ImGui desktop editor. The GUI is off by default and
+# needs the vcpkg `studio` feature (-DVCPKG_MANIFEST_FEATURES=studio) for
+# imgui + glfw3; Studio's GUI-free document core and its headless tests build
+# whenever tests do, so they run in the plain CI matrix too.
+if(MCDF_BUILD_STUDIO OR MCDF_BUILD_TESTS)
   add_subdirectory(apps/studio)
 endif()
 
 if(MCDF_BUILD_TESTS)
-  enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(MCDF_BUILD_FUZZERS)
+  add_subdirectory(fuzz)
 endif()
