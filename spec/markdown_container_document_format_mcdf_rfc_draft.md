@@ -169,7 +169,10 @@ Rules:
 
 - Detached signatures stored under `signatures/`, one file per signer
 - Supports multiple signers
-- Algorithms: Ed25519, RSA-PSS, ECDSA
+- **Algorithm allow-list (v1, normative):** `EdDSA` (Ed25519) and `ES256`
+  (ECDSA P-256). Verifiers MUST reject signatures using any other algorithm
+  (`E_SIG_ALG_NOT_ALLOWED`). Widening the list (e.g., RSA-PSS or post-quantum
+  ML-DSA) requires a revision of this specification.
 - Signature encoding SHOULD be detached JWS (RFC 7515) or COSE_Sign1 (RFC 9052)
 - Each signature SHOULD carry a key identifier resolvable through `metadata.yaml` (e.g., a DID), binding the signature to a declared author
 - Countersignatures (e.g., an approver signing over an author) are additional signature files whose payload includes the hash of the prior signature
@@ -281,7 +284,61 @@ PDF generation SHOULD occur only at release milestones.
 
 ---
 
-## 10. Security Considerations
+## 10. Conformance
+
+### 10.1 Profiles (normative)
+
+An implementation declares the highest profile it supports; each profile is a
+superset of the one before it, and a fully useful reader/writer exists at
+**Core** with no cryptography at all. Validating a container *at* a profile
+applies that profile's checks and every check below it.
+
+| Profile | An implementation MUST be able to… | Requires |
+|---|---|---|
+| **Core** | read, write and modify the members (`content.md`, `schema.yaml`, `metadata.yaml`, assets) and enforce structure binding (§4.2) | text + YAML + JSON |
+| **Integrity** | build and verify `manifest.json` (§4.4) | + SHA-256, JCS (RFC 8785) |
+| **Signed** | produce and verify detached signatures over the canonical manifest (§5.1) | + EdDSA / ES256, `did:key` |
+| **Encrypted** | encrypt and decrypt members per `encryption/policy.yaml` (§5.2) | + AES-256-GCM, HPKE (RFC 9180) |
+| **Render** | produce the deterministic HTML and plain-text renderings (§6) | + CommonMark renderer |
+
+Validators MUST report failures using the stable error codes of the MCDF
+conformance kit's error taxonomy (`/conformance/errors.md`), which is
+normative; the known-answer vectors under `/conformance/vectors/` define the
+expected verdicts an implementation is scored against.
+
+### 10.2 Modification and re-signing semantics (normative)
+
+- A Core implementation modifies a document by editing member files directly;
+  no cryptography is required, and rebuilding `manifest.json` is OPTIONAL at
+  Core.
+- Adding or rebuilding `manifest.json`, adding signatures, or appending audit
+  entries MUST NOT alter the bytes of any content member (`content.md`,
+  `schema.yaml`, `metadata.yaml`, assets). Trust layers wrap content; they
+  never rewrite it.
+- Editing any listed member invalidates existing signatures by construction
+  (its manifest hash changes). The modify flow is: edit → rebuild manifest →
+  re-sign. A verifier MUST treat a container whose manifest does not match its
+  members as failing Integrity regardless of signature validity.
+
+### 10.3 Canonical form of text members (normative)
+
+So that identical documents hash identically on every platform and editor:
+
+- Line endings MUST be LF (U+000A); writers MUST normalize CR and CRLF to LF.
+- A non-empty `content.md` MUST end with exactly one trailing LF (trailing
+  blank lines are collapsed); an empty member stays empty.
+- All other bytes are preserved verbatim. Trailing intra-line whitespace is
+  significant in Markdown (hard line breaks) and MUST NOT be stripped.
+
+The same rules apply to `schema.yaml` and `metadata.yaml`. Readers MUST
+accept non-canonical line endings (the format stays forgiving), but any tool
+that rewrites a member SHOULD write it back in canonical form. Hashes in
+`manifest.json` always cover the stored bytes; canonical form is what makes
+those bytes platform-independent.
+
+---
+
+## 11. Security Considerations
 
 - **Content substitution**: prevented by manifest hashing plus signatures over the canonical manifest. A verifier MUST recompute every listed hash before trusting content.
 - **Partial-file / mixed-version attacks**: because signatures cover the whole manifest, mixing files from different versions invalidates verification.
@@ -294,50 +351,51 @@ PDF generation SHOULD occur only at release milestones.
 
 ---
 
-## 11. Licensing & Intellectual Property
+## 12. Licensing & Intellectual Property
 
-### 11.1 Intent
+### 12.1 Intent
 
 MCDF is designed to be implementable by anyone, **royalty-free (RF)**, without dependence on proprietary technology. The specification, its reference implementation, and all contributions are governed by an explicit, permissive, royalty-free IP posture so that independent, interoperable implementations can be built without seeking permission or paying fees.
 
-### 11.2 Licenses
+### 12.2 Licenses
 
 MCDF uses a **dual-license split by content type**, adopted for this project (see `LICENSING.md` at the repository root):
 
 - **Specification text** — this RFC and all specification documents — is licensed under the **Community Specification License 1.0** (`Community-Spec-1.0`; see the `LICENSE` file in this `spec/` directory). CSL is purpose-built for specifications: it grants everyone the right to build independent, interoperable implementations and binds Contributors to a royalty-free patent commitment with a formal patent-exclusion process (recorded in `NOTICE.md`).
 - **Reference implementation and tooling** — all source code — is licensed under the **Apache License 2.0** (`Apache-2.0`; see `/LICENSE` at the repository root), whose Section 3 confers a perpetual, worldwide, royalty-free patent license from each contributor, with defensive termination.
 
-### 11.3 Contributor Patent Commitment
+### 12.3 Contributor Patent Commitment
 
 - Every contribution MUST carry a royalty-free grant covering any patent claim that is necessarily infringed by implementing that contribution (an "Essential Claim").
 - The grant is subject to **defensive termination**: a party that asserts a patent alleging that a Compliant Implementation infringes an Essential Claim forfeits the reciprocal grant.
 - No contribution may impose royalty, field-of-use, per-seat, or discriminatory restrictions on Compliant Implementations.
 
-### 11.4 Component Provenance
+### 12.4 Component Provenance
 
 MCDF is composed exclusively of standards-track components published under royalty-free terms. Implementers SHOULD confirm that any additional component they introduce carries compatible RF terms **before** it becomes REQUIRED by a conformance profile. A component whose licensing would encumber Compliant Implementations MUST NOT be made mandatory.
 
-### 11.5 Output-Format Conformance
+### 12.5 Output-Format Conformance
 
 When rendering to an external output format, implementers SHOULD target conformance with that format's published, royalty-free specification so that generated output remains within whatever patent grant that format's specification provides. Output that departs from a published RF profile of a target format falls outside the scope of MCDF's IP guarantees.
 
-### 11.6 Scope of This Posture
+### 12.6 Scope of This Posture
 
 This section governs MCDF's own specification and contributions. It is **not** a freedom-to-operate opinion for any particular product: implementers remain responsible for clearing patents relevant to the broader functional areas their product touches (e.g., rights management, versioning, collaboration).
 
 ---
 
-## 12. Open Questions
+## 13. Open Questions
 
 - Standard container encoding for signed interchange (OCI vs TAR) and media-type registration
-- Mandatory vs optional components (minimum conformance profile)
 - Governance and stewardship (standards body, reference implementation, conformance suite)
-- Canonicalization of `content.md` for diff-stable hashing (line endings, trailing whitespace, YAML front-matter ordering)
 - Post-quantum signature support (e.g., ML-DSA) alongside classical algorithms
+
+Resolved in this revision: the minimum conformance profile (§10.1) and
+`content.md` canonicalization (§10.3).
 
 ---
 
-## 13. Conclusion
+## 14. Conclusion
 
 MCDF redefines documents as **secure, intelligent, composable knowledge containers**. It aligns documentation with modern software, security, and AI practices while preserving the ability to render traditional formats when necessary.
 
@@ -345,15 +403,16 @@ This RFC proposes MCDF as a foundation for the next generation of document syste
 
 ---
 
-## 14. References
+## 15. References
 
-### 14.1 Normative
+### 15.1 Normative
 - RFC 2119 / RFC 8174 — Requirement key words
 - RFC 8785 — JSON Canonicalization Scheme (JCS)
 - CommonMark Specification — `content.md` syntax
 - RFC 7515 (JWS) / RFC 9052 (COSE) — signature encodings
+- MCDF Conformance Kit (`/conformance` in the reference repository) — error taxonomy (`errors.md`), JSON Schemas, known-answer vectors
 
-### 14.2 Informative
+### 15.2 Informative
 - Apache License 2.0 — reference implementation & patent grant
 - Community Specification License 1.0 — candidate specification license
 - OCI Image / Artifact Specification — registry distribution

@@ -18,4 +18,11 @@ namespace mcdf {
 std::string metadata_to_yaml(const Metadata& metadata);
 std::string schema_to_yaml(const Schema& schema);
 
+// Canonical text-member form (spec: content.md canonicalization): CR and CRLF
+// become LF, and non-empty text ends with exactly one trailing LF. All other
+// bytes are preserved verbatim - trailing intra-line whitespace is significant
+// in Markdown (hard breaks) and is never stripped. Writers apply this on save
+// so the same document hashes identically on every platform.
+std::string canonicalize_content(std::string_view text);
+
 }  // namespace mcdf

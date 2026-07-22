@@ -96,6 +96,21 @@ TEST_CASE("schema yaml round-trips through the parser") {
   CHECK(mcdf::schema_to_yaml(*parsed) == yaml);
 }
 
+TEST_CASE("content canonicalization: LF endings, one trailing newline") {
+  CHECK(mcdf::canonicalize_content("a\r\nb\rc\n") == "a\nb\nc\n");
+  CHECK(mcdf::canonicalize_content("no trailing newline") ==
+        "no trailing newline\n");
+  CHECK(mcdf::canonicalize_content("many\n\n\n\n") == "many\n");
+  CHECK(mcdf::canonicalize_content("") == "");
+  // Trailing intra-line whitespace is a Markdown hard break - preserved.
+  CHECK(mcdf::canonicalize_content("hard break  \nnext\n") ==
+        "hard break  \nnext\n");
+  // Idempotent.
+  const std::string once = mcdf::canonicalize_content("x\r\ny\r\n\r\n");
+  CHECK(mcdf::canonicalize_content(once) == once);
+  CHECK(once == "x\ny\n");
+}
+
 TEST_CASE("schema yaml handles an empty schema") {
   const mcdf::Schema s;
   const std::string yaml = mcdf::schema_to_yaml(s);

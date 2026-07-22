@@ -96,6 +96,24 @@ std::string metadata_to_yaml(const Metadata& metadata) {
   return out.str();
 }
 
+std::string canonicalize_content(std::string_view text) {
+  std::string out;
+  out.reserve(text.size() + 1);
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '\r') {
+      out += '\n';
+      if (i + 1 < text.size() && text[i + 1] == '\n') ++i;  // CRLF -> LF
+    } else {
+      out += text[i];
+    }
+  }
+  while (out.size() >= 2 && out[out.size() - 1] == '\n' &&
+         out[out.size() - 2] == '\n')
+    out.pop_back();  // collapse trailing blank lines to one newline
+  if (!out.empty() && out.back() != '\n') out += '\n';
+  return out;
+}
+
 std::string schema_to_yaml(const Schema& schema) {
   std::ostringstream out;
   out << "document_type: " << scalar(schema.document_type) << "\n";
