@@ -225,6 +225,24 @@ void audit_append_entry(Doc& d, const std::string& action,
                         const std::string& actor);
 void audit_make_checkpoint(Doc& d, const SigningKey& key);
 
+// ---- diff ----------------------------------------------------------------------
+
+enum class DiffTag { kSame, kAdded, kRemoved };
+
+struct DiffLine {
+  DiffTag tag = DiffTag::kSame;
+  std::string text;
+};
+
+// Line diff (LCS) from `before` to `after`. Very large inputs degrade to a
+// coarse prefix/suffix diff instead of quadratic memory.
+std::vector<DiffLine> diff_lines(std::string_view before,
+                                 std::string_view after);
+
+// content.md as last saved - the archive for .mcdf documents, else the
+// working copy on disk. Canonicalized; empty when unavailable.
+std::string baseline_content(const Doc& d);
+
 // ---- conformance + render ------------------------------------------------------
 
 void refresh_conformance(Doc& d);  // all profiles, cached per disk state

@@ -85,7 +85,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xorg-dev libxkbcommon-dev libwayland-dev wayland-protocols \
-            extra-cmake-modules libgl1-mesa-dev libglu1-mesa-dev
+            extra-cmake-modules libgl1-mesa-dev libglu1-mesa-dev xvfb
 
       - name: Configure
         shell: bash
@@ -99,6 +99,12 @@ jobs:
 
       - name: Build Studio
         run: cmake --build build --config Release --parallel --target mcdf-studio
+
+      # Offscreen crash check (plan 04 §10): hidden window under Xvfb, every
+      # panel forced on against the signed showcase document, 120 frames.
+      - name: UI smoke (offscreen)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ./build/apps/studio/mcdf-studio --smoke examples/showcase.mcdf
 
       - name: Upload Studio binary
         uses: actions/upload-artifact@v4

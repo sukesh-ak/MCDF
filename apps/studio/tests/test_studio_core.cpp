@@ -207,6 +207,49 @@ TEST_CASE("encrypt locks content and the save path never clobbers ciphertext") {
   drop(ks);
 }
 
+TEST_CASE("content is stored canonically (LF, single trailing newline)") {
+  studio::Doc d;
+  studio::init_blank(d);
+  REQUIRE(studio::flush_working_copy(d, "line one\r\nline two\r\n\r\n", true));
+  auto c = mcdf::open_container(d.workdir);
+  REQUIRE(c.has_value());
+  auto raw = (*c)->read("content.md");
+  REQUIRE(raw.has_value());
+  CHECK(*raw == "line one\nline two\n");
+  // A buffer differing only in line endings shows no drift against disk.
+  studio::refresh_disk_hashes(d);
+  studio::update_live_content_hash(d, "line one\r\nline two\r\n\r\n");
+  CHECK_FALSE(studio::manifest_drift(d).any());
+  drop(d);
+}
+
+TEST_CASE("diff_lines classifies added, removed and unchanged lines") {
+  const auto diff = studio::diff_lines("a\nb\nc\n", "a\nB\nc\nd\n");
+  int same = 0, added = 0, removed = 0;
+  for (const auto& l : diff) {
+    if (l.tag == studio::DiffTag::kSame) ++same;
+    else if (l.tag == studio::DiffTag::kAdded) ++added;
+    else ++removed;
+  }
+  CHECK(same == 2);     // a, c
+  CHECK(removed == 1);  // b
+  CHECK(added == 2);    // B, d
+  CHECK(studio::diff_lines("x\n", "x\n").size() == 1);
+  CHECK(studio::diff_lines("", "").empty());
+}
+
+TEST_CASE("baseline_content is the last saved archive") {
+  studio::Doc d;
+  studio::init_blank(d);
+  const fs::path out = studio::make_workdir() / "base.mcdf";
+  REQUIRE(studio::save_as(d, "# v1\n", out.string()));
+  // The baseline stays at v1 regardless of what the live buffer holds now.
+  CHECK(studio::baseline_content(d) == "# v1\n");
+  drop(d);
+  std::error_code ec;
+  fs::remove_all(out.parent_path(), ec);
+}
+
 TEST_CASE("audit chain appends, verifies and checkpoints") {
   studio::Keystore ks = test_keystore();
   studio::Doc d;

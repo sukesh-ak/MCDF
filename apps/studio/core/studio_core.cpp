@@ -357,7 +357,10 @@ bool write_members(Doc& d, const std::string& content, const fs::path& where,
     return false;
   };
   if (!is_encrypted("content.md")) {
-    if (auto w = (*dir)->write("content.md", content); !w) {
+    // Spec: content is stored canonically (LF, one trailing newline) so the
+    // same document hashes identically on every platform.
+    if (auto w = (*dir)->write("content.md", mcdf::canonicalize_content(content));
+        !w) {
       err = w.error().message;
       return false;
     }
@@ -480,7 +483,10 @@ void update_live_content_hash(Doc& d, const std::string& content) {
   if (!d.has_manifest || d.content_encrypted) return;
   const std::string alg =
       d.manifest.hash_algorithm.empty() ? "sha256" : d.manifest.hash_algorithm;
-  if (auto h = mcdf::hash_hex(alg, content)) d.cur_hash["content.md"] = *h;
+  // Hash what a save would write (canonical form), so a buffer differing only
+  // in line endings / trailing newline does not show as drift.
+  if (auto h = mcdf::hash_hex(alg, mcdf::canonicalize_content(content)))
+    d.cur_hash["content.md"] = *h;
 }
 
 void update_live_props_hash(Doc& d) {
@@ -696,6 +702,95 @@ void audit_make_checkpoint(Doc& d, const SigningKey& k) {
   }
   reload_manifest(d);
   d.status = "audit checkpoint signed by " + k.did;
+}
+
+// ---- diff ----------------------------------------------------------------------
+
+namespace {
+
+std::vector<std::string_view> split_lines(std::string_view s) {
+  std::vector<std::string_view> lines;
+  std::size_t start = 0;
+  while (start < s.size()) {
+    const std::size_t nl = s.find('\n', start);
+    if (nl == std::string_view::npos) {
+      lines.push_back(s.substr(start));
+      break;
+    }
+    lines.push_back(s.substr(start, nl - start));
+    start = nl + 1;
+  }
+  return lines;
+}
+
+}  // namespace
+
+std::vector<DiffLine> diff_lines(std::string_view before,
+                                 std::string_view after) {
+  const auto a = split_lines(before);
+  const auto b = split_lines(after);
+  std::size_t pre = 0;
+  while (pre < a.size() && pre < b.size() && a[pre] == b[pre]) ++pre;
+  std::size_t suf = 0;
+  while (suf < a.size() - pre && suf < b.size() - pre &&
+         a[a.size() - 1 - suf] == b[b.size() - 1 - suf])
+    ++suf;
+  const std::size_t n = a.size() - pre - suf;
+  const std::size_t m = b.size() - pre - suf;
+
+  std::vector<DiffLine> out;
+  out.reserve(a.size() + b.size());
+  for (std::size_t i = 0; i < pre; ++i)
+    out.push_back({DiffTag::kSame, std::string(a[i])});
+
+  if (n * m <= 1'000'000) {  // LCS over the changed middle
+    std::vector<std::vector<unsigned>> dp(n + 1,
+                                          std::vector<unsigned>(m + 1, 0));
+    for (std::size_t i = n; i-- > 0;)
+      for (std::size_t j = m; j-- > 0;)
+        dp[i][j] = (a[pre + i] == b[pre + j])
+                       ? dp[i + 1][j + 1] + 1
+                       : std::max(dp[i + 1][j], dp[i][j + 1]);
+    std::size_t i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[pre + i] == b[pre + j]) {
+        out.push_back({DiffTag::kSame, std::string(a[pre + i])});
+        ++i;
+        ++j;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        out.push_back({DiffTag::kRemoved, std::string(a[pre + i])});
+        ++i;
+      } else {
+        out.push_back({DiffTag::kAdded, std::string(b[pre + j])});
+        ++j;
+      }
+    }
+    while (i < n) out.push_back({DiffTag::kRemoved, std::string(a[pre + i++])});
+    while (j < m) out.push_back({DiffTag::kAdded, std::string(b[pre + j++])});
+  } else {  // degenerate: whole middle replaced
+    for (std::size_t i = 0; i < n; ++i)
+      out.push_back({DiffTag::kRemoved, std::string(a[pre + i])});
+    for (std::size_t j = 0; j < m; ++j)
+      out.push_back({DiffTag::kAdded, std::string(b[pre + j])});
+  }
+
+  for (std::size_t k = 0; k < suf; ++k)
+    out.push_back({DiffTag::kSame, std::string(a[a.size() - suf + k])});
+  return out;
+}
+
+std::string baseline_content(const Doc& d) {
+  if (d.is_archive && !d.archive_path.empty()) {
+    if (auto t = mcdf::TarContainer::open(d.archive_path))
+      if (auto c = (*t)->read("content.md"))
+        return mcdf::canonicalize_content(*c);
+    return {};
+  }
+  if (d.workdir.empty()) return {};
+  if (auto c = mcdf::open_container(d.workdir))
+    if (auto raw = (*c)->read("content.md"))
+      return mcdf::canonicalize_content(*raw);
+  return {};
 }
 
 // ---- conformance + render ------------------------------------------------------

@@ -14,17 +14,22 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -76,10 +81,21 @@ const ImVec4 kDirty{1.00f, 0.70f, 0.20f, 1.0f};
 struct Document : studio::Doc {
   int id = 0;
   bool open = true;         // window open flag ([x] closes it)
+  bool busy = false;        // a worker-thread job owns the core state right now
   float split = 0.5f;       // editor|preview split ratio
 
   std::unique_ptr<TextEditor> editor;
   std::size_t saved_undo = 0;  // editor undo index at the last save
+
+  // Metadata/Schema form undo history (snapshots, keystrokes coalesced).
+  std::vector<std::pair<mcdf::Metadata, mcdf::Schema>> props_hist;
+  int props_hist_pos = 0;
+  double props_last_push = -1.0e9;
+
+  // Diff panel cache (baseline vs the live buffer).
+  std::vector<studio::DiffLine> diff;
+  std::size_t diff_undo = static_cast<std::size_t>(-1);
+  int diff_disk_rev = -1;
 
   bool props_dirty = false;  // unsaved metadata/schema form edits
   int props_rev = 0;         // bumped on metadata/schema form edits
@@ -108,7 +124,6 @@ using studio::refresh_audit;
 using studio::refresh_conformance;
 using studio::refresh_signatures;
 using studio::remove_signature;
-using studio::run_verify;
 
 // imgui_md subclass: image textures + a visible link color. get_image resolves
 // against g_render_workdir (the document currently being previewed).
@@ -157,6 +172,11 @@ bool g_show_encryption = false;
 bool g_show_audit = false;
 bool g_show_conformance = false;
 bool g_show_container = false;
+bool g_show_diff = false;
+
+// --smoke: hidden window, all panels forced on, run N frames, exit - the
+// offscreen crash check CI runs under xvfb (plan 04 §10).
+bool g_smoke = false;
 
 // The signing + HPKE keystore (PEMs in config_dir()/keys). App-level state -
 // one selected key signs/decrypts for any document.
@@ -458,6 +478,8 @@ void load_preferences() {
       g_show_conformance = (v != "0");
     } else if (k == "panel_container") {
       g_show_container = (v != "0");
+    } else if (k == "panel_diff") {
+      g_show_diff = (v != "0");
     } else if (k == "signing_key") {
       g_saved_key_path = v;
     } else if (k == "wallpaper") {
@@ -496,6 +518,7 @@ void save_preferences(GLFWwindow* w) {
   f << "panel_audit=" << (g_show_audit ? 1 : 0) << '\n';
   f << "panel_conformance=" << (g_show_conformance ? 1 : 0) << '\n';
   f << "panel_container=" << (g_show_container ? 1 : 0) << '\n';
+  f << "panel_diff=" << (g_show_diff ? 1 : 0) << '\n';
   f << "signing_key="
     << (g_ks.key_idx >= 0 && g_ks.key_idx < static_cast<int>(g_ks.keys.size())
             ? g_ks.keys[g_ks.key_idx].path
@@ -730,9 +753,86 @@ void sync_editor(Document& d) {
   d.props_dirty = false;
   d.enc_recipients.clear();
   d.enc_files = {"content.md"};
+  d.props_hist.clear();
+  d.props_hist_pos = 0;
   d.outline_undo = static_cast<std::size_t>(-1);  // force an outline reparse
   d.mh_undo = static_cast<std::size_t>(-1);       // re-apply live hash overlays
   d.mh_props_rev = -1;
+  d.diff_undo = static_cast<std::size_t>(-1);
+  d.diff_disk_rev = -1;
+}
+
+// ---- async jobs ----------------------------------------------------------------
+// Heavy engine ops (pack, sign, HPKE, canonical render) run on one worker
+// thread so the UI never blocks on crypto (plan 04 §5/§6). One job owns a
+// document at a time: while `busy`, the UI shows a wait notice and does not
+// read that document's core state.
+struct Job {
+  Document* doc = nullptr;
+  std::function<void()> work;           // runs on the worker thread
+  std::function<void(Document&)> done;  // runs on the UI thread afterwards
+};
+std::deque<Job> g_jobs;
+std::mutex g_jobs_mx;
+std::condition_variable g_jobs_cv;
+std::deque<Job> g_done_jobs;
+std::mutex g_done_mx;
+bool g_worker_quit = false;
+std::thread g_worker;
+
+void worker_main() {
+  for (;;) {
+    Job job;
+    {
+      std::unique_lock lk(g_jobs_mx);
+      g_jobs_cv.wait(lk, [] { return g_worker_quit || !g_jobs.empty(); });
+      if (g_jobs.empty()) return;  // quitting and fully drained
+      job = std::move(g_jobs.front());
+      g_jobs.pop_front();
+    }
+    job.work();
+    {
+      std::lock_guard lk(g_done_mx);
+      g_done_jobs.push_back(std::move(job));
+    }
+    glfwPostEmptyEvent();  // wake the UI if the idle throttle is sleeping
+  }
+}
+
+void submit_job(Document& d, std::function<void()> work,
+                std::function<void(Document&)> done = {}) {
+  d.busy = true;
+  {
+    std::lock_guard lk(g_jobs_mx);
+    g_jobs.push_back({&d, std::move(work), std::move(done)});
+  }
+  g_jobs_cv.notify_one();
+}
+
+// UI thread, once per frame: apply results of finished jobs.
+void drain_done_jobs() {
+  for (;;) {
+    Job job;
+    {
+      std::lock_guard lk(g_done_mx);
+      if (g_done_jobs.empty()) return;
+      job = std::move(g_done_jobs.front());
+      g_done_jobs.pop_front();
+    }
+    job.doc->busy = false;
+    sync_editor(*job.doc);
+    if (job.done) job.done(*job.doc);
+  }
+}
+
+void shutdown_worker() {
+  {
+    std::lock_guard lk(g_jobs_mx);
+    g_worker_quit = true;
+  }
+  g_jobs_cv.notify_all();
+  if (g_worker.joinable()) g_worker.join();
+  drain_done_jobs();
 }
 
 void add_recent(const std::string& path) {
@@ -769,48 +869,82 @@ void new_blank_document() {
   sync_editor(*d);
 }
 
-// Manifest/Trust actions: thin wrappers passing the live editor buffer into
-// the core, then advancing this window's save bookkeeping. In folder mode a
-// flush *is* the save, so the editor's saved state advances too.
+// Manifest/Trust/save actions: async wrappers. Each snapshots the live editor
+// buffer (and undo index) at submit time, runs the core op on the worker, and
+// applies the save bookkeeping on the UI thread when done - so typing during
+// a save can never be marked as saved. In folder mode a flush *is* the save.
 void rebuild_manifest(Document& d) {
-  if (!d.editor) return;
-  if (!studio::rebuild_manifest(d, d.editor->GetText())) return;
-  d.props_dirty = false;
-  if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
+  if (!d.editor || d.busy) return;
+  auto ok = std::make_shared<bool>(false);
+  const std::size_t undo = d.editor->GetUndoIndex();
+  submit_job(
+      d,
+      [&d, ok, text = d.editor->GetText()] {
+        *ok = studio::rebuild_manifest(d, text);
+      },
+      [ok, undo](Document& d) {
+        if (!*ok) return;
+        d.props_dirty = false;
+        if (!d.is_archive) d.saved_undo = undo;
+      });
 }
 
 void sign_document(Document& d) {
-  const SigningKey* k = studio::selected_signing_key(g_ks);
-  if (!k || !d.editor) return;
-  if (!studio::sign_document(d, d.editor->GetText(), *k, g_sig_name)) return;
-  d.props_dirty = false;
-  if (!d.is_archive) d.saved_undo = d.editor->GetUndoIndex();
+  const SigningKey* sel = studio::selected_signing_key(g_ks);
+  if (!sel || !d.editor || d.busy) return;
+  auto ok = std::make_shared<bool>(false);
+  const std::size_t undo = d.editor->GetUndoIndex();
+  submit_job(
+      d,
+      [&d, ok, text = d.editor->GetText(), key = *sel, name = g_sig_name] {
+        *ok = studio::sign_document(d, text, key, name);
+      },
+      [ok, undo](Document& d) {
+        if (!*ok) return;
+        d.props_dirty = false;
+        if (!d.is_archive) d.saved_undo = undo;
+      });
+}
+
+void run_verify(Document& d) {
+  if (d.busy) return;
+  submit_job(d, [&d] { studio::run_verify(d); });
 }
 
 void open_save_as_dialog();  // fwd: an untitled document's first Save opens it
 
 void save(Document& d) {
-  if (!d.editor) return;
-  const studio::SaveResult r = studio::save(d, d.editor->GetText());
-  if (r == studio::SaveResult::kNeedsPath) {  // untitled: choose a file first
+  if (!d.editor || d.busy) return;
+  if (d.path.empty()) {  // untitled: choose a file first
     g_active = &d;
     open_save_as_dialog();
     return;
   }
-  if (r == studio::SaveResult::kSaved) {
-    d.saved_undo = d.editor->GetUndoIndex();
-    d.props_dirty = false;
-  }
+  auto res = std::make_shared<studio::SaveResult>(studio::SaveResult::kFailed);
+  const std::size_t undo = d.editor->GetUndoIndex();
+  submit_job(
+      d,
+      [&d, res, text = d.editor->GetText()] { *res = studio::save(d, text); },
+      [res, undo](Document& d) {
+        if (*res == studio::SaveResult::kSaved) {
+          d.saved_undo = undo;
+          d.props_dirty = false;
+        }
+      });
 }
 
 void save_as(Document& d, std::string path) {
-  if (!d.editor) return;
-  if (studio::save_as(d, d.editor->GetText(), std::move(path)))
-    sync_editor(d);  // the document now points at the new .mcdf
+  if (!d.editor || d.busy) return;
+  submit_job(
+      d,
+      [&d, text = d.editor->GetText(), p = std::move(path)] {
+        studio::save_as(d, text, p);  // repoints d at the new .mcdf
+      },
+      [](Document& d) { add_recent(d.path); });
 }
 
 void insert_image(Document& d, const std::string& src) {
-  if (!d.editor || d.workdir.empty()) return;
+  if (!d.editor || d.workdir.empty() || d.busy) return;
   std::error_code ec;
   const fs::path assets = d.workdir / "assets";
   fs::create_directories(assets, ec);
@@ -1037,7 +1171,7 @@ void draw_menu_bar() {
       ImGui::EndMenu();
     }
     ImGui::Separator();
-    const bool can_save = g_active && g_active->has_content;
+    const bool can_save = g_active && g_active->has_content && !g_active->busy;
     if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save", "Ctrl+S", false, can_save))
       save(*g_active);
     if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK "  Save As...", "Ctrl+Shift+S", false, can_save))
@@ -1062,6 +1196,7 @@ void draw_menu_bar() {
                     &g_show_conformance);
     ImGui::MenuItem(ICON_FA_BOX_ARCHIVE "  Container", nullptr,
                     &g_show_container);
+    ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Diff", nullptr, &g_show_diff);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Insert")) {
@@ -1161,39 +1296,57 @@ void jump_to_heading(Document& d, std::size_t idx) {
   d.editor->SetFocus();
 }
 
-// The active document, or null if none has content (panels act on g_active).
+// The active document, or null if none has content or a worker job currently
+// owns its state (panels act on g_active and never read a busy document).
 Document* panel_target() {
-  return (g_active && g_active->has_content) ? g_active : nullptr;
+  return (g_active && g_active->has_content && !g_active->busy) ? g_active
+                                                                : nullptr;
 }
 
-// ---- E5-E7 operations (thin wrappers over studio::) ----------------------------
+// What a panel shows when panel_target() is null.
+void no_target_notice() {
+  if (g_active && g_active->busy)
+    ImGui::TextDisabled(ICON_FA_HOURGLASS_HALF "  working...");
+  else
+    ImGui::TextDisabled("No document with content.md is active.");
+}
+
+// ---- E5-E7 operations (async wrappers over studio::) ---------------------------
 
 void encrypt_document(Document& d) {
-  if (!d.editor) return;
-  if (studio::encrypt_document(d, d.editor->GetText(), d.enc_recipients,
-                               d.enc_files))
-    sync_editor(d);  // ciphertext on disk, policy present, editor locks
+  if (!d.editor || d.busy) return;
+  submit_job(d, [&d, text = d.editor->GetText(), recips = d.enc_recipients,
+                 files = d.enc_files] {
+    studio::encrypt_document(d, text, recips, files);
+  });  // on completion sync_editor locks the (now ciphertext) buffer
 }
 
 void decrypt_document(Document& d) {
-  const EncKeyEntry* k = studio::selected_enc_key(g_ks);
-  if (!k) return;
-  if (studio::decrypt_document(d, *k)) sync_editor(d);
+  const EncKeyEntry* sel = studio::selected_enc_key(g_ks);
+  if (!sel || d.busy) return;
+  submit_job(d, [&d, key = *sel] { studio::decrypt_document(d, key); });
 }
 
 void audit_append_entry(Document& d, const std::string& action) {
+  if (d.busy) return;
   const SigningKey* k = studio::selected_signing_key(g_ks);
-  studio::audit_append_entry(d, action, k ? k->did : "mcdf-studio");
+  submit_job(d, [&d, action,
+                 actor = k ? k->did : std::string("mcdf-studio")] {
+    studio::audit_append_entry(d, action, actor);
+  });
 }
 
 void audit_make_checkpoint(Document& d) {
-  const SigningKey* k = studio::selected_signing_key(g_ks);
-  if (k) studio::audit_make_checkpoint(d, *k);
+  const SigningKey* sel = studio::selected_signing_key(g_ks);
+  if (!sel || d.busy) return;
+  submit_job(d, [&d, key = *sel] { studio::audit_make_checkpoint(d, key); });
 }
 
 void export_render(Document& d, mcdf::RenderFormat fmt, std::string path) {
-  if (d.editor)
-    studio::export_render(d, d.editor->GetText(), fmt, std::move(path));
+  if (!d.editor || d.busy) return;
+  submit_job(d, [&d, text = d.editor->GetText(), fmt, p = std::move(path)] {
+    studio::export_render(d, text, fmt, p);
+  });
 }
 
 // Outline of the live editor buffer + schema sections with their binding
@@ -1206,7 +1359,7 @@ void draw_structure_panel() {
   if (ImGui::Begin(ICON_FA_LIST "  Structure###Structure", &g_show_structure)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       const auto& outline = outline_of(d);
@@ -1270,6 +1423,62 @@ void draw_structure_panel() {
   ImGui::End();
 }
 
+// ---- Metadata/Schema form undo (snapshot history, shared by both panels) -------
+
+void props_apply(Document& d, const std::pair<mcdf::Metadata, mcdf::Schema>& s) {
+  d.meta = s.first;
+  d.schema = s.second;
+  d.write_meta = d.write_schema = true;
+  d.props_dirty = true;
+  ++d.props_rev;
+  d.title = d.meta.title;
+  d.doc_type = d.schema.document_type;
+}
+
+// Record the pre-edit snapshot; rapid keystrokes within a second coalesce
+// into one undo step.
+void props_record(Document& d,
+                  const std::pair<mcdf::Metadata, mcdf::Schema>& before) {
+  const double now = ImGui::GetTime();
+  const bool at_tail = d.props_hist_pos == static_cast<int>(d.props_hist.size());
+  if (at_tail && !d.props_hist.empty() && now - d.props_last_push < 1.0) {
+    d.props_last_push = now;  // coalesce with the previous step
+    return;
+  }
+  d.props_hist.resize(d.props_hist_pos);  // dropping any redo tail
+  d.props_hist.push_back(before);
+  d.props_hist_pos = static_cast<int>(d.props_hist.size());
+  d.props_last_push = now;
+}
+
+void props_undo(Document& d) {
+  if (d.props_hist_pos <= 0) return;
+  if (d.props_hist_pos == static_cast<int>(d.props_hist.size()))
+    d.props_hist.push_back({d.meta, d.schema});  // keep live state for redo
+  --d.props_hist_pos;
+  props_apply(d, d.props_hist[d.props_hist_pos]);
+}
+
+void props_redo(Document& d) {
+  if (d.props_hist_pos + 1 >= static_cast<int>(d.props_hist.size())) return;
+  ++d.props_hist_pos;
+  props_apply(d, d.props_hist[d.props_hist_pos]);
+}
+
+// Undo/redo arrows shown at the top of the Metadata and Schema panels.
+void props_history_buttons(Document& d) {
+  ImGui::BeginDisabled(d.props_hist_pos <= 0);
+  if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT)) props_undo(d);
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Undo form edit");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(d.props_hist_pos + 1 >=
+                       static_cast<int>(d.props_hist.size()));
+  if (ImGui::SmallButton(ICON_FA_ROTATE_RIGHT)) props_redo(d);
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Redo form edit");
+}
+
 // Form over metadata.yaml. Editing any field marks the document dirty and the
 // member is (re)written on Save via libmcdf's metadata_to_yaml.
 void draw_metadata_panel() {
@@ -1278,12 +1487,16 @@ void draw_metadata_panel() {
   if (ImGui::Begin(ICON_FA_TAGS "  Metadata###Metadata", &g_show_metadata)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       bool ch = false;
-      if (!d.write_meta)
+      const auto before = std::make_pair(d.meta, d.schema);
+      props_history_buttons(d);
+      if (!d.write_meta) {
+        ImGui::SameLine();
         ImGui::TextDisabled("(no metadata.yaml yet - editing creates it on Save)");
+      }
 
       ch |= input_text("Title", d.meta.title);
       ch |= input_text("Version", d.meta.version);
@@ -1333,6 +1546,7 @@ void draw_metadata_panel() {
       }
 
       if (ch) {
+        props_record(d, before);
         d.write_meta = true;
         d.props_dirty = true;
         ++d.props_rev;
@@ -1350,12 +1564,16 @@ void draw_schema_panel() {
   if (ImGui::Begin(ICON_FA_SITEMAP "  Schema###Schema", &g_show_schema)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       bool ch = false;
-      if (!d.write_schema)
+      const auto before = std::make_pair(d.meta, d.schema);
+      props_history_buttons(d);
+      if (!d.write_schema) {
+        ImGui::SameLine();
         ImGui::TextDisabled("(no schema.yaml yet - editing creates it on Save)");
+      }
 
       ch |= input_text("Document type", d.schema.document_type);
 
@@ -1405,6 +1623,7 @@ void draw_schema_panel() {
                           "with its id, e.g.  ## Title {#id}");
 
       if (ch) {
+        props_record(d, before);
         d.write_schema = true;
         d.props_dirty = true;
         ++d.props_rev;
@@ -1443,7 +1662,7 @@ void draw_manifest_panel() {
   if (ImGui::Begin(ICON_FA_FINGERPRINT "  Manifest###Manifest", &g_show_manifest)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else if (!dp->has_manifest) {
       ImGui::TextDisabled("(no manifest.json in this container)");
       ImGui::Spacing();
@@ -1593,7 +1812,7 @@ void draw_trust_panel() {
     ImGui::SeparatorText(ICON_FA_SIGNATURE "  Signatures");
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       refresh_manifest_view(d);
@@ -1712,7 +1931,7 @@ void draw_encryption_panel() {
     ImGui::Spacing();
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else if (dp->policy) {
       Document& d = *dp;
       const mcdf::EncryptionPolicy& p = *d.policy;
@@ -1810,7 +2029,7 @@ void draw_audit_panel() {
   if (ImGui::Begin(ICON_FA_TIMELINE "  Audit###Audit", &g_show_audit)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       refresh_audit(d);
@@ -1897,7 +2116,7 @@ void draw_conformance_panel() {
                    &g_show_conformance)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       refresh_conformance(d);
@@ -1941,7 +2160,7 @@ void draw_container_panel() {
                    &g_show_container)) {
     Document* dp = panel_target();
     if (!dp) {
-      ImGui::TextDisabled("No document with content.md is active.");
+      no_target_notice();
     } else {
       Document& d = *dp;
       ImGui::TextDisabled("%s", d.is_archive ? ".mcdf document (deterministic TAR)"
@@ -2018,6 +2237,68 @@ void draw_container_panel() {
   ImGui::End();
 }
 
+// The "documents you can diff" story: live buffer vs the last saved bytes
+// (the .mcdf archive for archive documents, the working copy for folders).
+void draw_diff_panel() {
+  if (!g_show_diff) return;
+  ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(ICON_FA_CODE_COMPARE "  Diff###Diff", &g_show_diff)) {
+    Document* dp = panel_target();
+    if (!dp) {
+      no_target_notice();
+    } else {
+      Document& d = *dp;
+      if (const std::size_t undo = d.editor->GetUndoIndex();
+          undo != d.diff_undo || d.disk_rev != d.diff_disk_rev) {
+        d.diff_undo = undo;
+        d.diff_disk_rev = d.disk_rev;
+        d.diff = studio::diff_lines(
+            studio::baseline_content(d),
+            mcdf::canonicalize_content(d.editor->GetText()));
+      }
+      int adds = 0, dels = 0;
+      for (const auto& l : d.diff) {
+        if (l.tag == studio::DiffTag::kAdded) ++adds;
+        else if (l.tag == studio::DiffTag::kRemoved) ++dels;
+      }
+      ImGui::TextDisabled("%s", d.is_archive ? "vs the last saved .mcdf"
+                                             : "vs the working copy on disk");
+      ImGui::SameLine();
+      if (adds == 0 && dels == 0) {
+        ImGui::TextDisabled("|  no changes");
+      } else {
+        ImGui::TextColored(kBound, "+%d", adds);
+        ImGui::SameLine();
+        ImGui::TextColored(kMissing, "-%d", dels);
+      }
+      ImGui::Separator();
+      ImGui::BeginChild("##diff", ImVec2(0, 0), ImGuiChildFlags_None);
+      if (g_mono)
+#if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 19200
+        ImGui::PushFont(g_mono, 0.0f);
+#else
+        ImGui::PushFont(g_mono);
+#endif
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(d.diff.size()));
+      while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+          const studio::DiffLine& l = d.diff[i];
+          if (l.tag == studio::DiffTag::kAdded)
+            ImGui::TextColored(kBound, "+ %s", l.text.c_str());
+          else if (l.tag == studio::DiffTag::kRemoved)
+            ImGui::TextColored(kMissing, "- %s", l.text.c_str());
+          else
+            ImGui::TextDisabled("  %s", l.text.c_str());
+        }
+      }
+      if (g_mono) ImGui::PopFont();
+      ImGui::EndChild();
+    }
+  }
+  ImGui::End();
+}
+
 // One document = a dockable window with an editor | preview split.
 void draw_document_window(Document& d) {
   const std::string name = d.path.empty() ? std::string("untitled")
@@ -2034,7 +2315,11 @@ void draw_document_window(Document& d) {
   if (win_open) {
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) g_active = &d;
 
-    if (!d.has_content) {
+    if (d.busy) {
+      const ImVec2 avail = ImGui::GetContentRegionAvail();
+      ImGui::SetCursorPos(ImVec2(avail.x * 0.5f - 60.0f, avail.y * 0.45f));
+      ImGui::TextDisabled(ICON_FA_HOURGLASS_HALF "  working...");
+    } else if (!d.has_content) {
       ImGui::TextUnformatted("(no content.md)");
     } else if (d.content_encrypted) {
       const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -2153,6 +2438,8 @@ void draw_status_bar() {
     if (!g_active) {
       ImGui::TextDisabled(ICON_FA_FILE "  %d document(s) open",
                           static_cast<int>(g_documents.size()));
+    } else if (g_active->busy) {
+      ImGui::TextDisabled(ICON_FA_HOURGLASS_HALF "  working...");
     } else {
       Document& d = *g_active;
       ImGui::BeginGroup();
@@ -2223,7 +2510,14 @@ void glfw_error_callback(int error, const char* description) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  std::string smoke_path;
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--smoke") g_smoke = true;
+    else if (g_smoke && smoke_path.empty()) smoke_path = a;
+  }
+
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
@@ -2242,6 +2536,7 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
 
+  if (g_smoke) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
   GLFWwindow* window = glfwCreateWindow(g_win_geom.w, g_win_geom.h, "MCDF Studio",
                                         nullptr, nullptr);
   if (!window) {
@@ -2270,8 +2565,20 @@ int main() {
   apply_theme(g_prefs.theme);
   load_wallpaper(g_prefs.wallpaper_path);
 
+  g_worker = std::thread(worker_main);
+
+  if (g_smoke) {  // exercise every panel against the given document
+    g_prefs.idle_throttle = false;
+    g_show_structure = g_show_metadata = g_show_schema = g_show_manifest =
+        g_show_trust = g_show_encryption = g_show_audit = g_show_conformance =
+            g_show_container = g_show_diff = true;
+    if (!smoke_path.empty()) open_path(smoke_path);
+  }
+  int smoke_frames = 0;
+
   g_last_input = glfwGetTime();
   while (!glfwWindowShouldClose(window) && !g_quit) {
+    if (g_smoke && ++smoke_frames > 120) g_quit = true;
     // Idle throttle: sleep between frames when there is no input (a document app
     // needn't redraw at 60fps while idle), but wake instantly on any event.
     if (g_prefs.idle_throttle) {
@@ -2294,6 +2601,7 @@ int main() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
+    drain_done_jobs();  // apply finished worker jobs on the UI thread
     handle_shortcuts();
     render_wallpaper();
     draw_host();
@@ -2303,10 +2611,8 @@ int main() {
       const std::string picked = g_dialog.SelectedPath();
       if (g_pending == OpenMode::Archive) open_archive(picked);
       else if (g_pending == OpenMode::Folder) open_folder(picked);
-      else if (g_pending == OpenMode::SaveAs && g_target_doc) {
-        save_as(*g_target_doc, picked);
-        add_recent(g_target_doc->path);
-      }
+      else if (g_pending == OpenMode::SaveAs && g_target_doc)
+        save_as(*g_target_doc, picked);  // async; adds to recents when done
       else if (g_pending == OpenMode::InsertImage && g_target_doc) insert_image(*g_target_doc, picked);
       else if (g_pending == OpenMode::Wallpaper) { g_prefs.wallpaper_path = picked; load_wallpaper(picked); }
       else if (g_pending == OpenMode::LoadKey) add_key_from_file(picked, true);
@@ -2320,7 +2626,7 @@ int main() {
       g_pending = OpenMode::None;
       g_target_doc = nullptr;
     }
-    if (dlg_res != imfd::Result::None) save_preferences(g_window);
+    if (dlg_res != imfd::Result::None && !g_smoke) save_preferences(g_window);
 
     for (auto& d : g_documents) draw_document_window(*d);
     draw_structure_panel();
@@ -2332,12 +2638,13 @@ int main() {
     draw_audit_panel();
     draw_conformance_panel();
     draw_container_panel();
+    draw_diff_panel();
     draw_status_bar();
     draw_settings();
 
     // Reap closed documents (remove + clean their temp working copies).
     for (auto it = g_documents.begin(); it != g_documents.end();) {
-      if (!(*it)->open) {
+      if (!(*it)->open && !(*it)->busy) {  // never reap under a worker job
         if (g_active == it->get()) g_active = nullptr;
         close_document(**it);
         it = g_documents.erase(it);
@@ -2358,7 +2665,8 @@ int main() {
     glfwSwapBuffers(window);
   }
 
-  save_preferences(window);
+  shutdown_worker();  // let in-flight jobs finish before touching documents
+  if (!g_smoke) save_preferences(window);
   for (auto& d : g_documents) close_document(*d);
   g_documents.clear();
   clear_texture_cache();
