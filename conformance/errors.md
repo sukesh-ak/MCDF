@@ -29,17 +29,23 @@ the code an implementation MUST raise. Messages are free-form; **codes are not**
 
 | Code | Raised when |
 |---|---|
+| `E_SIG_MISSING` | validating the Signed profile and the container has no `signatures/*.sig` |
 | `E_SIG_INVALID` | a signature does not verify over the canonical manifest |
 | `E_SIG_ALG_NOT_ALLOWED` | JWS `alg` is outside the allow-list (`EdDSA`, `ES256`) |
 | `E_SIG_ALG_MISMATCH` | the resolved key's type does not match the header `alg` |
-| `E_KID_UNRESOLVABLE` | `kid` is not a resolvable `did:key` |
+| `E_KID_UNRESOLVABLE` | `kid` (or a policy recipient `id`) is not a resolvable `did:key` |
 
 ## Encrypted profile
 
+Static validation (no key supplied) checks `encryption/policy.yaml` soundness;
+an unencrypted container trivially passes. The two decrypt-time codes require a
+key and are raised by the decrypt operation, not `validate`.
+
 | Code | Raised when |
 |---|---|
-| `E_NOT_A_RECIPIENT` | no recipient entry matches the supplied key |
-| `E_DECRYPT_FAILED` | AEAD authentication fails |
+| `E_POLICY_INVALID` | `encryption/policy.yaml` is unparseable or inconsistent (no files, missing listed files, no/incomplete recipients) |
+| `E_NOT_A_RECIPIENT` | no recipient entry matches the supplied key (decrypt) |
+| `E_DECRYPT_FAILED` | AEAD authentication fails (decrypt) |
 
 ## Audit
 
