@@ -7,7 +7,7 @@
 namespace mcdf {
 
 inline constexpr int version_major = 0;
-inline constexpr int version_minor = 4;
+inline constexpr int version_minor = 5;
 inline constexpr int version_patch = 0;
 
 // Library version as "MAJOR.MINOR.PATCH".
