@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MCDF Web</title>
+    <!--
+      GitHub Pages has no server-side rewrites, so unknown paths land here. The
+      app is a single page; send visitors to it rather than showing a dead end.
+      `replace` keeps the bad URL out of the history stack.
+    -->
+    <script>
+      (function () {
+        var base = location.pathname.split('/')[1];
+        location.replace(base ? '/' + base + '/' : '/');
+      })();
+    </script>
+  </head>
+  <body>
+    <p>Redirecting to <a href="./">MCDF Web</a>…</p>
+  </body>
+</html>

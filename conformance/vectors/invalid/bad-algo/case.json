@@ -1,0 +1,6 @@
+{
+  "description": "hash_algorithm is outside the allow-list.",
+  "profile": "integrity",
+  "expect": "fail",
+  "error": "E_ALGO_NOT_ALLOWED"
+}

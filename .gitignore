@@ -1,0 +1,30 @@
+# Private / internal notes — NOT part of the public spec or code.
+# Contains working research and analysis that must never be published.
+/internal/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Build output & dependencies (for future reference implementation)
+/dist/
+/build/
+node_modules/
+
+# MCDF Studio runtime config (ImGui layout + app prefs), written at run time
+/imgui.ini
+/mcdf.ini
+/preferences.ini
+
+# vcpkg classic-mode installs (e.g. testing ports/mcdf locally)
+vcpkg_installed/
+
+# Web client (apps/web) build output and tooling caches. The npm lockfile IS
+# committed - it is what the license audit and CI pin against.
+apps/web/packages/*/dist/
+apps/web/**/.vite/
+apps/web/**/.svelte-kit/
+apps/web/**/playwright-report/
+apps/web/**/test-results/
+apps/web/**/.playwright/

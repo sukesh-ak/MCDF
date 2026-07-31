@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+<title>Render &amp; &lt;Vectors&gt;</title>
+<meta name="generator" content="mcdf-render/2">
+<meta name="mcdf-source" content="sha256:6a2be4f07ba5aaa55d669e31a96ffeb4242f8b2a3145ef0fef72abdb23983fb8">
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;line-height:1.6}pre{overflow-x:auto}</style>
+</head>
+<body>
+<h1 id="top">Canonical Render</h1>
+<p>Prose with <em>emphasis</em>, <strong>strong</strong>, <code>a &amp; b</code>, a <a href="https://example.org/doc">link</a>,
+an autolink <a href="https://example.org/auto">https://example.org/auto</a>, an entity ©, and text that looks
+like markup: &lt;div&gt;not a tag&lt;/div&gt;.</p>
+<h2 id="lists">Lists</h2>
+<ul>
+<li>tight one</li>
+<li>tight two
+<ul>
+<li>nested tight</li>
+</ul>
+</li>
+</ul>
+<ol>
+<li>
+<p>loose first</p>
+</li>
+<li>
+<p>loose second</p>
+</li>
+</ol>
+<blockquote>
+<p>A quote, wrapped
+across two source lines.</p>
+</blockquote>
+<pre><code class="language-sh">mcdf render html doc/ -o doc.html
+</code></pre>
+<p>A hard break lives here<br />
+and the line after it.</p>
+<p><img src="assets/diagram.png" alt="Sized" width="480" style="width:480px;height:auto;max-width:100%;display:block;margin-left:auto;margin-right:auto" /></p>
+<p><img src="assets/diagram.png" alt="Captioned" title="A plain caption" /></p>
+<hr />
+</body>
+</html>

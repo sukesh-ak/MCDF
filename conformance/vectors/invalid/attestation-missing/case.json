@@ -1,0 +1,6 @@
+{
+  "description": "content.md is sealed and schema.yaml declares required sections, but encryption/policy.yaml carries no structure attestation, so a validator cannot evaluate section binding at all. Spec 5.2.1 requires the attestation in exactly this case. The expected verdict is E_POLICY_INVALID once, naming the encryptor's omission - NOT E_REQUIRED_SECTION_MISSING per section, which would blame the document for something that may well be fine.",
+  "profile": "encrypted",
+  "expect": "fail",
+  "error": "E_POLICY_INVALID"
+}

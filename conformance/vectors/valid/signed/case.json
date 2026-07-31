@@ -1,0 +1,5 @@
+{
+  "description": "A container with a valid Ed25519 (EdDSA) detached JWS over the canonical manifest.",
+  "profile": "signed",
+  "expect": "pass"
+}

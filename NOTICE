@@ -1,0 +1,11 @@
+MCDF — Markdown Container Document Format
+Copyright 2026 Sukesh Ashok Kumar and The MCDF Project
+
+The MCDF Project is maintained by Sukesh Ashok Kumar <sukesh@live.com>.
+
+This repository is dual-licensed by content type:
+  - Source code and tooling ......... Apache License 2.0     (see LICENSE)
+  - Specification text (spec/) ........ Community Specification License 1.0
+                                        (see spec/LICENSE)
+
+See LICENSING.md for the full mapping and SPDX conventions.

@@ -1,0 +1,5 @@
+{
+  "description": "A container with a valid ECDSA P-256 (ES256) detached JWS - both allow-list algorithms must verify.",
+  "profile": "signed",
+  "expect": "pass"
+}

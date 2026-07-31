@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MCDF">
+  <title>MCDF</title>
+  <!--
+    SPDX-License-Identifier: Apache-2.0
+    Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+
+    A page carrying its own seal — the format's whole claim in one mark.
+
+    SVG rather than a set of PNGs: it is one file, it is sharp at every size a
+    launcher asks for, and it needs no image tooling in the build (the same
+    in-house habit as the TAR writer and the HTML normaliser). The artwork stays
+    inside a 410px safe circle so `purpose: maskable` cannot crop anything that
+    matters.
+  -->
+  <rect width="512" height="512" rx="104" fill="#0b5cad" />
+
+  <!-- The page. -->
+  <path
+    d="M150 108h140l72 72v226a18 18 0 0 1-18 18H150a18 18 0 0 1-18-18V126a18 18 0 0 1 18-18z"
+    fill="#ffffff"
+  />
+  <!-- The folded corner: a container, not a flat file. -->
+  <path d="M290 108l72 72h-72z" fill="#9dc4ea" />
+
+  <!-- Content lines. -->
+  <g fill="#0b5cad" opacity="0.55">
+    <rect x="170" y="212" width="172" height="16" rx="8" />
+    <rect x="170" y="252" width="140" height="16" rx="8" />
+    <rect x="170" y="292" width="158" height="16" rx="8" />
+  </g>
+
+  <!-- The seal: proof travelling with the document. -->
+  <circle cx="344" cy="356" r="74" fill="#0b5cad" stroke="#ffffff" stroke-width="16" />
+  <path
+    d="M312 356l22 24 44-50"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="20"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

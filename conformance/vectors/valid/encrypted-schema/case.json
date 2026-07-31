@@ -1,0 +1,5 @@
+{
+  "description": "An encrypted document that carries a schema. Both required sections bound before content.md was sealed, and encryption/policy.yaml records that in a structure attestation (spec 5.2.1), so the binding rule of 4.2 is still evaluated and still passes. Before the attestation existed, encrypting this document cost it its conformance: every implementation reported the sections as missing when they were only unreadable.",
+  "profile": "encrypted",
+  "expect": "pass"
+}

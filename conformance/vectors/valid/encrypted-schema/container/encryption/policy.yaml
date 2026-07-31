@@ -1,0 +1,12 @@
+method: aes-256-gcm
+key_management: hpke
+encrypted_files:
+  - content.md
+structure:
+  bound_sections:
+    - overview
+    - terms
+recipients:
+  - id: did:key:z6LSr7sbW7Vky2TyUwYqkgAh35NdqasxnCACja6EJKdGtK1h
+    enc: xm64nhIQtIenvlNi6ryJf1kOE4lhuO21WnfFe-F5nUI
+    wrapped_key: wB1uNqMt9FlXWM0BQkspy69wrDfLrOIgvWaf1JQEo-gmHYkkeGSPIUUQldPlDep6

@@ -1,0 +1,27 @@
+{
+  "name": "mcdf-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCDF Web — accessible SPA client and the mcdf-ts independent implementation",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/mcdf-ts",
+    "packages/app"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "dev": "npm run dev --workspace packages/app",
+    "conformance": "npm run build --workspace packages/mcdf-ts && sh ../../conformance/run.sh \"$PWD/node_modules/.bin/mcdf-ts\"",
+    "license-audit": "node scripts/license-audit.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.5"
+  }
+}

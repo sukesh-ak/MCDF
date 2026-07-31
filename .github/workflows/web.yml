@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# CI for the web client. Completely independent of the C++ build:
+# it shares only the conformance kit, which mcdf-ts is scored against exactly as
+# the reference CLI is.
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths: ['apps/web/**', 'conformance/**', '.github/workflows/web.yml']
+  pull_request:
+    branches: [main]
+    paths: ['apps/web/**', 'conformance/**', '.github/workflows/web.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: apps/web
+
+jobs:
+  build:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci --no-audit --no-fund
+
+      # The same script the container workflows run, so CI and a developer's
+      # shell cannot drift: build, type + a11y checks, unit tests (which include
+      # the conformance vectors), license gate, then the conformance kit itself.
+      - name: Build, check, test, audit, score
+        run: sh scripts/test-all.sh
+
+      - name: Build the app
+        run: npm run build --workspace packages/app
+
+      - name: Upload the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdf-web-dist
+          path: apps/web/packages/app/dist
+          if-no-files-found: error
+
+  a11y:
+    name: e2e & axe
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web/packages/app
+
+      - name: Build mcdf-ts
+        run: npm run build --workspace packages/mcdf-ts
+
+      - name: Playwright + axe
+        run: npm run test:e2e --workspace packages/app
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/packages/app/playwright-report
+          retention-days: 7

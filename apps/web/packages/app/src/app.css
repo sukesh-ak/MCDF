@@ -1,0 +1,240 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+ *
+ * Design tokens and base styles. Both colour schemes are authored explicitly
+ * and every text pair clears WCAG 2.2 AA contrast (4.5:1 body, 3:1 large text
+ * and UI borders). Interactive targets are at least 24x24 CSS px (SC 2.5.8).
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, monospace;
+
+  --radius: 6px;
+  --gap: 0.75rem;
+  --target: 24px;
+
+  /* Light theme (default). */
+  --bg: #ffffff;
+  --bg-sunken: #f4f5f7;
+  --bg-raised: #ffffff;
+  --fg: #16191d;
+  --fg-muted: #545b64;
+  --border: #c3c8d0;
+  --border-strong: #8b929c;
+
+  --accent: #0b5cad;
+  --accent-fg: #ffffff;
+  --focus: #0b5cad;
+
+  --ok: #15683b;
+  --ok-bg: #e4f4ea;
+  --warn: #7a4c00;
+  --warn-bg: #fdf1dc;
+  --danger: #9b1c1c;
+  --danger-bg: #fdeaea;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --bg-sunken: #0e1116;
+    --bg-raised: #1b1f26;
+    --fg: #e9ecf1;
+    --fg-muted: #a7b0bd;
+    --border: #39414d;
+    --border-strong: #5d6673;
+
+    --accent: #6fb2ff;
+    --accent-fg: #0b1420;
+    --focus: #8cc2ff;
+
+    --ok: #6ddc9b;
+    --ok-bg: #123021;
+    --warn: #f0c069;
+    --warn-bg: #34260c;
+    --danger: #ff9a9a;
+    --danger-bg: #3a1616;
+  }
+}
+
+/* An explicit choice always wins over the system preference. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-sunken: #f4f5f7;
+  --bg-raised: #ffffff;
+  --fg: #16191d;
+  --fg-muted: #545b64;
+  --border: #c3c8d0;
+  --border-strong: #8b929c;
+  --accent: #0b5cad;
+  --accent-fg: #ffffff;
+  --focus: #0b5cad;
+  --ok: #15683b;
+  --ok-bg: #e4f4ea;
+  --warn: #7a4c00;
+  --warn-bg: #fdf1dc;
+  --danger: #9b1c1c;
+  --danger-bg: #fdeaea;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #14171c;
+  --bg-sunken: #0e1116;
+  --bg-raised: #1b1f26;
+  --fg: #e9ecf1;
+  --fg-muted: #a7b0bd;
+  --border: #39414d;
+  --border-strong: #5d6673;
+  --accent: #6fb2ff;
+  --accent-fg: #0b1420;
+  --focus: #8cc2ff;
+  --ok: #6ddc9b;
+  --ok-bg: #123021;
+  --warn: #f0c069;
+  --warn-bg: #34260c;
+  --danger: #ff9a9a;
+  --danger-bg: #3a1616;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-sunken);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+#app {
+  height: 100%;
+}
+
+/* A single, consistent focus indicator: 2px outline plus a 2px offset ring, so
+ * it stays visible against every surface (SC 2.4.13). */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Only remove the default ring where :focus-visible is supported. */
+@supports selector(:focus-visible) {
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --border: var(--border-strong);
+  }
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  min-height: var(--target);
+  min-width: var(--target);
+  padding: 0.35rem 0.7rem;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-sunken);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+input[type='text'],
+input[type='search'],
+select,
+textarea {
+  min-height: var(--target);
+  padding: 0.35rem 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  width: 100%;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* Visible only to assistive technology. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The skip link stays in the tab order and becomes visible on focus. */
+.skip-link {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  padding: 0.6rem 1rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+  transform: translateY(-120%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}

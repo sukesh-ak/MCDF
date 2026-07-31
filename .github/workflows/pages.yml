@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# Deploys MCDF Web to GitHub Pages.
+#
+# Pages is sufficient because the SPA is fully static — there is no server side
+# by design. Two consequences worth remembering:
+#   * HTTPS is automatic, and it is *required*: WebCrypto only works in a secure
+#     context, so signing would silently break on a plain-HTTP host.
+#   * Pages cannot set custom headers, so there is no COOP/COEP cross-origin
+#     isolation and no SharedArrayBuffer. Pure TypeScript plus ordinary Web
+#     Workers do not need it.
+#
+# ONE-TIME SETUP, required before the first run:
+#   Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
+#
+# This cannot be automated from here. `actions/configure-pages` has an
+# `enablement: true` option, but the repository's Actions token is capped by
+# Settings -> Actions -> Workflow permissions; where that is read-only, no
+# `permissions:` block in this file can grant the `pages: write` the Pages API
+# needs, and the step fails with a 403. Flipping the source by hand is a
+# ten-second job and only has to happen once.
+name: Deploy Pages
+
+on:
+  # The client is a static app with no release cadence of its own, so main is
+  # what should be live. The paths filter keeps a C++-only push from
+  # redeploying an identical site.
+  #
+  # Tags deliberately do NOT trigger a deploy, though they used to. The Pages
+  # environment only accepts deployments from main, so every `v*` push built the
+  # site and then failed at the deploy step — a red run on each of v0.6.0 and
+  # v0.7.0 for a site that main had already published seconds earlier. A release
+  # that always reports one failure is a release nobody reads.
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'spec/**'
+      - 'conformance/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Vite base path (use / for a custom domain)'
+        required: false
+        default: '/MCDF/'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: License audit
+        run: node scripts/license-audit.mjs
+
+      - name: Type & accessibility check
+        run: |
+          npm run build --workspace packages/mcdf-ts
+          npm run check --workspaces --if-present
+
+      - name: Unit tests
+        run: npm test --workspaces --if-present
+
+      - name: Build
+        env:
+          MCDF_BASE: ${{ inputs.base || '/MCDF/' }}
+        run: npm run build --workspace packages/app
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/packages/app/dist
+
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

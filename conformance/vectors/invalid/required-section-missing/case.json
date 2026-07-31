@@ -1,0 +1,6 @@
+{
+  "description": "schema.yaml marks section terms as required but content.md has no matching {#terms} heading.",
+  "profile": "core",
+  "expect": "fail",
+  "error": "E_REQUIRED_SECTION_MISSING"
+}

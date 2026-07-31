@@ -1,0 +1,6 @@
+{
+  "description": "The content was edited and the manifest rebuilt after signing: integrity holds but the signature is stale.",
+  "profile": "signed",
+  "expect": "fail",
+  "error": "E_SIG_INVALID"
+}

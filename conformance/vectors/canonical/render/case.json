@@ -1,0 +1,6 @@
+{
+  "description": "mcdf render html|text must emit exactly expected/render.html and expected/render.txt: the canonical render of spec 10.4. The document is chosen to cover every construct where two CommonMark libraries were observed to disagree - void elements, a block opening inside a list item, raw HTML treated as text rather than as a block, character references, hard and soft breaks, an autolink, image layout hints - plus the pieces the container contributes: the escaped metadata title and the canonical-manifest hash. The generator names the render format, not the implementation, which is what lets a second implementation match these bytes at all.",
+  "profile": "render",
+  "expect": "pass",
+  "check": "canonical-render"
+}

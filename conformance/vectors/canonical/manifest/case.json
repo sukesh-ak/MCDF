@@ -1,0 +1,6 @@
+{
+  "description": "mcdf manifest must emit exactly expected/manifest.json: RFC 8785 canonical JSON, keys sorted by UTF-16 code unit (files < hash_algorithm < mcdf_version), no whitespace.",
+  "profile": "integrity",
+  "expect": "pass",
+  "check": "canonical-manifest"
+}

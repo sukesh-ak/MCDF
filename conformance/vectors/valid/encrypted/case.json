@@ -1,0 +1,5 @@
+{
+  "description": "AES-256-GCM encrypted content with an HPKE-wrapped CEK, signed over the ciphertext manifest.",
+  "profile": "encrypted",
+  "expect": "pass"
+}

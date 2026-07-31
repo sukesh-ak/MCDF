@@ -1,0 +1,26 @@
+Canonical Render
+
+Prose with emphasis, strong, a & b, a link, an autolink https://example.org/auto, an entity &copy;, and text that looks like markup: <div>not a tag</div>.
+
+Lists
+
+tight one
+
+tight two
+
+nested tight
+
+loose first
+
+loose second
+
+A quote, wrapped across two source lines.
+
+mcdf render html doc/ -o doc.html
+
+A hard break lives here
+and the line after it.
+
+Sized
+
+Captioned

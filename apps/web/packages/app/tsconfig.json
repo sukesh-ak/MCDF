@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "noEmit": true,
+    // `.svelte.ts` rune modules are imported with their full extension so both
+    // TypeScript and Vite resolve them unambiguously (a bare `./x.svelte`
+    // specifier would look like a component to the Svelte plugin).
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
+}

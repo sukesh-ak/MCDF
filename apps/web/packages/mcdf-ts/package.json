@@ -1,0 +1,76 @@
+{
+  "name": "mcdf-ts",
+  "version": "0.4.0",
+  "description": "An independent, dependency-light TypeScript implementation of the Markdown Container Document Format (MCDF): manifests, detached JWS signatures, HPKE encryption and audit chains. No DOM, runs in Node, browsers and workers.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "keywords": [
+    "mcdf",
+    "markdown",
+    "document",
+    "container",
+    "integrity",
+    "provenance",
+    "signature",
+    "jws",
+    "did-key",
+    "hpke"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sukesh-ak/MCDF.git",
+    "directory": "apps/web/packages/mcdf-ts"
+  },
+  "homepage": "https://github.com/sukesh-ak/MCDF",
+  "bugs": {
+    "url": "https://github.com/sukesh-ak/MCDF/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/fs-container.d.ts",
+      "default": "./dist/node/fs-container.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "bin": {
+    "mcdf-ts": "./bin/mcdf-ts.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@hpke/core": "^1.9.0",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.5.0",
+    "js-yaml": "^4.1.0",
+    "micromark": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.5"
+  }
+}

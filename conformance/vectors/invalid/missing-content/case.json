@@ -1,0 +1,6 @@
+{
+  "description": "content.md is absent.",
+  "profile": "core",
+  "expect": "fail",
+  "error": "E_MISSING_CONTENT"
+}

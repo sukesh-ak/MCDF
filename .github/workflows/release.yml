@@ -1,0 +1,314 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux-x64 }
+          - { os: windows-latest, name: windows-x64 }
+          - { os: macos-latest,   name: macos-arm64 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-release-${{ runner.os }}-
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -eu
+          extra=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # vcpkg's default Windows triplet links OpenSSL dynamically, which
+            # would ship an exe that cannot start without loose DLLs. Build a
+            # self-contained binary instead, matching Linux/macOS.
+            extra="-DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          fi
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVCPKG_MANIFEST_FEATURES=tests \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            $extra
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # Ship the CLI plus the licences it is distributed under.
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -eu
+          name="mcdf-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+
+          bin=$(find build/apps/cli -maxdepth 2 -type f \( -name mcdf -o -name mcdf.exe \) | head -1)
+          if [ -z "$bin" ]; then echo "::error::CLI binary not found"; exit 1; fi
+          cp "$bin" "dist/$name/"
+          cp README.md LICENSE NOTICE LICENSING.md "dist/$name/"
+
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+          ls -l
+
+      # Extract the archive somewhere clean and run it. Catches artifacts that
+      # only work from the build tree (e.g. missing runtime DLLs) - ctest cannot
+      # see that class of bug because it runs from the build directory.
+      - name: Verify the artifact runs standalone
+        shell: bash
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z x -o"$tmp" dist/*.zip >/dev/null
+          else
+            tar -xzf dist/*.tar.gz -C "$tmp"
+          fi
+          bin=$(find "$tmp" -type f \( -name mcdf -o -name mcdf.exe \) | head -1)
+          chmod +x "$bin" || true
+          "$bin" --version
+          "$bin" --help >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcdf-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Build + package the MCDF Studio GUI editor with its runtime libraries and
+  # fonts. GUI apps cannot be launched headlessly, so (unlike the CLI) there is
+  # no standalone run-check here - the CI 'studio' job already gates compilation.
+  studio:
+    name: studio ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux-x64 }
+          - { os: windows-latest, name: windows-x64 }
+          - { os: macos-latest,   name: macos-arm64 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-studio-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-studio-release-${{ runner.os }}-
+
+      # GLFW needs X11 / Wayland / OpenGL dev libraries on Linux; Windows/macOS
+      # use system frameworks that ship with the runner.
+      - name: Install GUI system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorg-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            extra-cmake-modules libgl1-mesa-dev libglu1-mesa-dev
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMCDF_BUILD_STUDIO=ON \
+            -DMCDF_BUILD_TESTS=OFF \
+            -DVCPKG_MANIFEST_FEATURES=studio \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build Studio
+        run: cmake --build build --config Release --parallel --target mcdf-studio
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -eu
+          name="mcdf-studio-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+
+          # Locate the binary wherever the generator placed it (Release/ on the
+          # VS generator, alongside build/ on Make/Ninja).
+          bin=$(find build/apps/studio -maxdepth 2 -type f \
+                  \( -name mcdf-studio -o -name mcdf-studio.exe \) | head -1)
+          if [ -z "$bin" ]; then echo "::error::studio binary not found"; exit 1; fi
+          bindir=$(dirname "$bin")
+          cp "$bin" "dist/$name/"
+
+          # Fonts/assets are deployed next to the binary post-build.
+          cp -r "$bindir/assets" "dist/$name/"
+
+          # Windows uses the dynamic triplet: bundle the app-local DLLs.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$bindir"/*.dll "dist/$name/" 2>/dev/null || true
+          fi
+
+          cp README.md LICENSE NOTICE LICENSING.md "dist/$name/"
+
+          # Fail loudly if the binary or its fonts (assets/fonts/*.ttf) are missing.
+          ls "dist/$name"/mcdf-studio* >/dev/null
+          ls "dist/$name"/assets/fonts/*.ttf >/dev/null
+
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcdf-studio-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Publish the TypeScript implementation to npm. Separate from the binary jobs:
+  # it depends on nothing they produce, and it must not be able to hold a GitHub
+  # release hostage.
+  #
+  # The npm version deliberately does NOT track the repo tag. mcdf-ts has its
+  # own cadence — a C++ release that does not touch it should not republish it,
+  # and a tag-must-match rule would turn that into a red release. The gate is
+  # simply "is this version already on npm?", which makes the job idempotent and
+  # makes publishing an explicit act: bump the package version.
+  #
+  # `provenance: true` in package.json needs `id-token: write`. The token check
+  # goes through a job-level env var because the `secrets` context is not
+  # available to a job-level `if`.
+  #
+  # NPM_TOKEN is deliberately unset until v1.0 (maintainer, 2026-07-30): nothing
+  # is published to any registry — npm, curated vcpkg, or the ESP-IDF Component
+  # Registry — before then, because a published name and version are permanent
+  # and all three are better decided once, together. Every step below is gated
+  # on the token, so this job passes by doing nothing until that changes.
+  npm:
+    name: publish mcdf-ts to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: apps/web
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.NPM_TOKEN != ''
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        if: env.NPM_TOKEN != ''
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Decide whether this version needs publishing
+        if: env.NPM_TOKEN != ''
+        id: gate
+        run: |
+          set -eu
+          version=$(node -p "require('./packages/mcdf-ts/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "mcdf-ts@$version" version >/dev/null 2>&1; then
+            echo "mcdf-ts@$version is already published - nothing to do"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install (locked)
+        if: steps.gate.outputs.publish == 'true'
+        run: npm ci --no-audit --no-fund
+
+      # Never publish something the conformance kit has not scored.
+      - name: Build, test and score against the conformance kit
+        if: steps.gate.outputs.publish == 'true'
+        run: sh scripts/test-all.sh
+
+      - name: Publish
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --workspace packages/mcdf-ts
+
+  release:
+    name: publish release
+    needs: [build, studio]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      # The spec + conformance kit travel with the release so implementers can
+      # target a fixed version without cloning.
+      - name: Package spec and conformance kit
+        run: |
+          set -eu
+          tar -czf staged/mcdf-spec-and-conformance.tar.gz spec conformance
+          cd staged
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      # Idempotent: re-running a release replaces its assets rather than failing.
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists - replacing assets"
+            gh release upload "$TAG" staged/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "MCDF $TAG" \
+              --generate-notes \
+              staged/*
+          fi

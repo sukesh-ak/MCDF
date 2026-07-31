@@ -1,0 +1,41 @@
+﻿{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "mcdf",
+  "version": "0.8.5",
+  "description": "Markdown Container Document Format - primary C++ runtime and tooling",
+  "license": "Apache-2.0",
+  "dependencies": [
+    "openssl",
+    "nlohmann-json",
+    "yaml-cpp",
+    "md4c",
+    "spdlog",
+    "fmt",
+    "cxxopts",
+    "pugixml",
+    "zlib"
+  ],
+  "features": {
+    "tests": {
+      "description": "Build unit tests",
+      "dependencies": [
+        "doctest"
+      ]
+    },
+    "studio": {
+      "description": "MCDF Studio - Dear ImGui desktop editor (apps/studio)",
+      "dependencies": [
+        {
+          "name": "imgui",
+          "features": [
+            "docking-experimental",
+            "glfw-binding",
+            "opengl3-binding"
+          ]
+        },
+        "glfw3",
+        "stb"
+      ]
+    }
+  }
+}

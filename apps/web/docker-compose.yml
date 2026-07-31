@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# Container workflows for the web client. Run from `apps/web/`:
+#
+#   docker compose run --rm install     # populate the dependency volume (once)
+#   docker compose up dev               # http://localhost:5173/MCDF/  (hot reload)
+#   docker compose run --rm test        # unit tests + conformance kit + checks
+#   docker compose up preview           # http://localhost:8080/MCDF/  (production build)
+#
+# Why the named volumes: node_modules on a bind-mounted Windows/macOS filesystem
+# makes Vite's dependency pre-bundling crawl (tens of thousands of small file
+# reads crossing the VM boundary). Keeping node_modules in Linux-native volumes
+# while bind-mounting only the source is the difference between a dev server that
+# starts in seconds and one that appears to hang.
+
+name: mcdf-web
+
+x-workspace: &workspace
+  image: node:22-bookworm-slim
+  working_dir: /repo/apps/web
+  volumes:
+    - ../../:/repo
+    - deps-root:/repo/apps/web/node_modules
+    - deps-app:/repo/apps/web/packages/app/node_modules
+    - deps-ts:/repo/apps/web/packages/mcdf-ts/node_modules
+  environment:
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+    NPM_CONFIG_FUND: 'false'
+
+services:
+  install:
+    <<: *workspace
+    command: npm install --no-audit --no-fund
+
+  dev:
+    <<: *workspace
+    command: sh -c "npm run build --workspace packages/mcdf-ts && npm run dev --workspace packages/app"
+    # Bind-mounted source on Windows/macOS delivers no inotify events into the
+    # container; without polling the watcher goes deaf and hot reload quietly
+    # serves stale modules.
+    # A YAML merge key is replaced wholesale, not merged, so the anchor's npm
+    # settings are repeated here rather than inherited.
+    environment:
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+      NPM_CONFIG_FUND: 'false'
+      MCDF_POLL: '1'
+    ports:
+      - '5173:5173'
+
+  test:
+    <<: *workspace
+    command: sh scripts/test-all.sh
+
+  preview:
+    <<: *workspace
+    command: sh -c "npm run build --workspace packages/app && npm run preview --workspace packages/app"
+    ports:
+      - '8080:8080'
+
+  # Playwright + axe against the production build. The image tag MUST match the
+  # @playwright/test version in packages/app/package.json — Playwright refuses to
+  # run against browsers it did not ship with.
+  e2e:
+    <<: *workspace
+    image: mcr.microsoft.com/playwright:v1.62.0-noble
+    working_dir: /repo/apps/web/packages/app
+    command: npx playwright test
+
+volumes:
+  deps-root:
+  deps-app:
+  deps-ts:

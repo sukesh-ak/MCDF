@@ -1,0 +1,5 @@
+{
+  "description": "Validating a sealed document at the render profile. Spec 6 says a sealed content.md MUST NOT be rendered - ciphertext fed to a CommonMark parser yields confident nonsense rather than an error - and that the Render profile is therefore not applicable rather than failed. A validator that renders anyway either emits garbage or reports a render failure against a document with nothing wrong with it, and both are wrong, so the expected verdict is a pass. Same container as valid/encrypted-schema, judged at a higher profile.",
+  "profile": "render",
+  "expect": "pass"
+}
