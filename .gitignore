@@ -28,3 +28,14 @@ apps/web/**/.svelte-kit/
 apps/web/**/playwright-report/
 apps/web/**/test-results/
 apps/web/**/.playwright/
+
+# ESP-IDF example: build trees and per-developer config, written by `idf.py`.
+# sdkconfig.defaults IS committed - it is the configuration the example needs;
+# every other sdkconfig is that one expanded for a single target and machine,
+# and CI writes one per gate configuration.
+micro/port/esp-idf/example/build*/
+micro/port/esp-idf/example/sdkconfig
+micro/port/esp-idf/example/sdkconfig.*
+!micro/port/esp-idf/example/sdkconfig.defaults
+micro/port/esp-idf/example/dependencies.lock
+micro/port/esp-idf/example/managed_components/

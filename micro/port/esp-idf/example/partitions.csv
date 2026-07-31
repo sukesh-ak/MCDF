@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# One extra data partition, `mcdf`, holding an .mcdf container as raw bytes.
+# Subtype 0x40 is in the range reserved for application use: the container is
+# not a filesystem image and claiming `spiffs` or `fat` would invite a mount
+# that must never happen.
+# Name,     Type, SubType,  Offset,   Size,   Flags
+nvs,        data, nvs,      ,         0x6000,
+phy_init,   data, phy,      ,         0x1000,
+factory,    app,  factory,  ,         1M,
+mcdf,       data, 0x40,     ,         1M,

@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# No `targets:` key, which the registry reads as "every target". That is the
+# honest claim: this component is C99 with no vendor headers, no assembly and no
+# architecture assumptions. What the build job proves is narrower - it compiles
+# clean for esp32s3 and esp32p4, one Xtensa part and one RISC-V part - and the
+# README says so rather than the manifest pretending otherwise.
+version: "0.2.0"
+description: >-
+  A portable C99 reader for MCDF (Markdown Container Document Format)
+  containers: USTAR index, member reads, metadata, schema and heading anchors,
+  with optional SHA-256 manifest verification and a CommonMark event stream.
+  Allocates nothing - all state lives in a caller-supplied arena.
+url: https://github.com/sukesh-ak/MCDF
+repository: https://github.com/sukesh-ak/MCDF.git
+documentation: https://github.com/sukesh-ak/MCDF/blob/main/micro/README.md
+issues: https://github.com/sukesh-ak/MCDF/issues
+license: Apache-2.0
+tags:
+  - mcdf
+  - document
+  - markdown
+  - reader
+  - ebook
+dependencies:
+  idf: ">=5.0"

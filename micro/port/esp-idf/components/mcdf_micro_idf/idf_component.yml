@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+version: "0.2.0"
+description: >-
+  ESP-IDF adapter for mcdf_micro: binds the reader's byte-source callback to a
+  file on a mounted VFS (SD card, FAT, SPIFFS, LittleFS) or to a raw flash
+  partition. Allocates nothing.
+url: https://github.com/sukesh-ak/MCDF
+repository: https://github.com/sukesh-ak/MCDF.git
+documentation: https://github.com/sukesh-ak/MCDF/blob/main/micro/port/esp-idf/README.md
+issues: https://github.com/sukesh-ak/MCDF/issues
+license: Apache-2.0
+tags:
+  - mcdf
+  - document
+  - markdown
+  - reader
+  - ebook
+dependencies:
+  idf: ">=5.0"

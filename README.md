@@ -95,8 +95,13 @@ forever. It reads the required TAR form through a caller-supplied callback and
 keeps its whole index in a caller-supplied arena, so an SD card, a flash
 partition and a host `FILE*` are the same three fields. It implements **Core and
 Integrity**, scores clean on those vectors, and reports `E_UNIMPLEMENTED` for
-the profiles it does not evaluate rather than claiming them. If your target is
-constrained, start there rather than from the C++ engine.
+the profiles it does not evaluate rather than claiming them; behind a feature
+gate it also hands `content.md` to a layout engine as a block/span event stream,
+a window at a time, so a reader's RAM is sized by its screen rather than by the
+documents it is given. It builds as an
+[ESP-IDF component](micro/port/esp-idf/) — for an Xtensa part and a RISC-V one
+alike. If your target is constrained, start there rather than from the C++
+engine.
 
 ## MCDF Web — the accessible client
 

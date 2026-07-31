@@ -199,8 +199,10 @@ cmake -B build -S micro && cmake --build build && ctest --test-dir build
 
 Under ESP-IDF the same `CMakeLists.txt` registers a component instead — one
 build description, because a second would drift. Nothing in `src/` or
-`include/` knows ESP-IDF exists; the adapter that does arrives in
-`port/esp-idf/`.
+`include/` knows ESP-IDF exists; the adapter that does lives in
+[`port/esp-idf/`](port/esp-idf/), with the component manifests and a runnable
+example beside it. CI compiles that example for an Xtensa part and a RISC-V one,
+in every gate configuration, with warnings as errors.
 
 Test targets, all run by `ctest`:
 
@@ -299,5 +301,5 @@ quickest way to see what a document actually contains.
 ## Status
 
 Core, Integrity and the Render event stream are complete, host-buildable and
-scored by the conformance kit. Still to come, in order: the ESP-IDF port under
-`port/esp-idf/`; signature verification as an injected primitive.
+scored by the conformance kit, and the ESP-IDF port builds for both of the parts
+it targets. Still to come: signature verification as an injected primitive.
