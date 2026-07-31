@@ -26,6 +26,89 @@ This repository holds the **specification** and the **primary C++ runtime**.
 Created and maintained by **[Sukesh Ashok Kumar](https://github.com/sukesh-ak)** —
 the format design, the specification, and the reference implementation.
 
+## Why bother with another document format
+
+Most documents today are either a PDF — a picture of a page — or a `.docx`, a
+zip of XML that no human reads. Both are opaque. You can't see what changed
+between two versions, you can't tell whether anyone altered one, and every AI
+pipeline that touches them begins by trying to reverse-engineer the structure
+back out of a layout.
+
+MCDF starts from the other end. The content is Markdown, the facts about it are
+YAML and JSON, and the whole thing is a tar file. Then it adds the parts plain
+Markdown never had: a declared structure, a hash for every file, signatures, and
+a history that can't be quietly rewritten.
+
+### Your documents live in Git properly
+
+A `.mcdf` unpacks to a folder of ordinary files, so version control does what it
+already does well:
+
+```diff
+ ## Terms and Conditions {#terms}
+
+-Payment is due within 30 days of invoice.
++Payment is due within 14 days of invoice.
+```
+
+That's a review comment waiting to happen. The same edit to a PDF gives you
+`Binary files a/contract.pdf and b/contract.pdf differ`, and a `.docx` is a zip,
+so you get the same non-answer unless you bolt a converter onto Git first.
+Branch a document, review it in a pull request, merge two people's edits,
+`git blame` a paragraph to find out when that clause appeared — none of it needs
+new tooling, because it is text in a folder.
+
+### Machines get structure instead of guesswork
+
+`schema.yaml` states what the document *is* and what it must contain:
+
+```yaml
+document_type: contract
+sections:
+  - id: terms
+    title: Terms and Conditions
+    required: true
+```
+
+Two things follow. Automation can route on `document_type` without opening the
+content at all — pick a template, send it for the right review, decide what an
+agent is allowed to do with it. And asking for the `terms` section is a lookup,
+not a heuristic: the spec binds each `id` to a `{#id}` heading in `content.md`,
+and a validator *rejects* a document that promises `terms` and doesn't deliver
+it. Compare that with running a regex over text scraped out of a PDF and hoping
+the heading survived.
+
+For LLMs specifically, `content.md` is already Markdown — the shape models read
+best. There's no extraction step to lose your tables, no column-order confusion,
+no page furniture mixed into the text. And because the manifest hashes every
+file, a pipeline can tell whether the thing it's about to summarise is the thing
+that was approved.
+
+### You can prove what it is and where it came from
+
+`manifest.json` hashes each file, `signatures/` says who signed it in a way
+anyone can check with `did:key`, and `audit.log` is hash-chained so edits,
+reordering and truncation all break the chain visibly. Change one character of a
+signed document and verification fails loudly — [try it](examples/README.md),
+it takes two minutes.
+
+### Nothing here locks you in
+
+If this project disappeared tomorrow, your documents would still open in a text
+editor. `tar -xf` gets you Markdown, YAML and JSON — no runtime, no library, no
+vendor. That is deliberate: reading, writing and modifying a document needs **no
+cryptography and no MCDF tooling at all**. The spec and the conformance kit are
+published so anyone can write their own implementation, and it has been done
+twice over already — once in TypeScript, once in C99 small enough for a
+microcontroller — neither sharing a line with the C++ runtime.
+
+### When you should *not* use MCDF
+
+If the appearance of the page is the point — a form that must look exactly so, a
+filing with a mandated layout, anything typeset for print — use a PDF. MCDF is
+for documents whose *content* is the point and whose appearance should adapt to
+whatever is reading them.
+
 ## Sponsor
 
 [![Github Sponsor](https://img.shields.io/badge/label-%E2%9D%A4-FF007F?style=for-the-badge&logo=github&label=CLICK%20HERE%20TO%20SPONSOR%20ME&labelColor=blue&color=FF007F)](https://github.com/sponsors/sukesh-ak)
