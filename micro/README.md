@@ -168,18 +168,20 @@ Four rules keep them from rotting:
 Worth knowing before you turn it on, because it is the one gate that changes the
 library's memory story rather than just its size:
 
-- **md4c needs the whole document in one contiguous buffer.** There is no
-  streaming entry point. The *caller* supplies that buffer — the library will
-  not allocate it behind your back — and its size is `mcdf_micro_render_size()`,
-  which is exactly the size of `content.md`.
-- **md4c allocates internally.** A build with this gate on needs a heap, where a
-  Core-only build needs none at all.
-- **It is about 41 KB of `.text`** at `-Os` — three times the rest of the
+- **It is about 43 KB of `.text`** at `-Os` — more than twice the rest of the
   library put together.
+- **md4c allocates internally.** A build with this gate on needs a heap, where a
+  Core-only build needs none at all. This one is not avoidable with a real
+  CommonMark parser.
 
-None of that is avoidable with a real CommonMark parser, which is why the gate
-exists: `MCDF_MICRO_ENABLE_RENDER=OFF` is still a reader that opens containers,
-reads members, and checks documents at Core and Integrity.
+What is **not** on that list is the document. md4c parses a contiguous buffer,
+so whatever you ask it to parse must be in RAM — but a reader draws thirty lines
+at a time and has no business holding a novel to do it, so the windowed walk
+below sizes the buffer by the **largest single top-level block** instead. A
+paragraph, a list, a code block: whichever is biggest, not the sum.
+
+`MCDF_MICRO_ENABLE_RENDER=OFF` is still a reader that opens containers, reads
+members, and checks documents at Core and Integrity.
 
 ## Building
 
@@ -248,6 +250,35 @@ size_t need;
 mcdf_micro_render_size(r, &need);                 /* == sizeof content.md */
 mcdf_micro_render(r, my_buffer, my_buffer_len, &callbacks, ctx);
 ```
+
+**A screen is not a document**, so there is a second way in for a reader whose
+RAM is sized by its display rather than by whatever it is handed:
+
+```c
+static uint8_t window[4096];                      /* not the document's size */
+mcdf_micro_render_iter it;
+int done = 0;
+
+mcdf_micro_render_begin(r, window, sizeof window, &it);
+while (!done) mcdf_micro_render_next(&it, &callbacks, ctx, &done);
+```
+
+This is exact, not an approximation: **the same events, in the same order**, as
+parsing the whole document would give. Two things make that true. A window ends
+only at a top-level block boundary, so no list, quote or fenced block is ever
+cut in half — which is why the buffer is sized by the largest block rather than
+by the document. And `_begin()` collects the document's link reference
+definitions in a streaming pre-pass and carries them into every window, so
+`[text][ref]` resolves in a window that does not contain the definition. That is
+the only construct in CommonMark that reaches across a document, and it emits no
+events of its own, so carrying it is invisible in the stream.
+
+A block that does not fit the buffer is `E_RANGE` — you are told to bring a
+bigger buffer, never handed a truncated parse.
+
+`mcdf-micro-cli events <container.mcdf> --window 256` runs the walk by hand; its
+output is byte-identical to the same command without `--window`, which is the
+property worth checking on any document you care about.
 
 Three things it does that a bare parser would not: an image or link
 destination arrives with a flag saying whether it names a **member of this

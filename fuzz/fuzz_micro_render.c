@@ -182,6 +182,26 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   (void)mcdf_micro_render_size(reader, &need);
   (void)mcdf_micro_render(reader, g_doc, sizeof g_doc, &cb, NULL);
 
+  /* The windowed walk, on a buffer far smaller than most inputs - so nearly
+   * every one exercises the boundary scan, the carried reference definitions
+   * and the seam between windows, which is where a slice into the buffer could
+   * outlive the window it pointed into. */
+  {
+    static unsigned char window[1024];
+    mcdf_micro_render_iter iter;
+    int done = 0;
+    unsigned guard;
+
+    if (mcdf_micro_render_begin(reader, window, sizeof window, &iter) ==
+        MCDF_MICRO_OK) {
+      for (guard = 0; guard < 4096u && !done; ++guard) {
+        if (mcdf_micro_render_next(&iter, &cb, NULL, &done) != MCDF_MICRO_OK) {
+          break;
+        }
+      }
+    }
+  }
+
   /* Again with the callbacks omitted: a NULL callback must be skipped, not
    * called through. */
   cb.enter_block = NULL;

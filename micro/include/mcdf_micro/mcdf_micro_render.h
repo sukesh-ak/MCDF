@@ -31,22 +31,32 @@
  * MCDF_MICRO_HAS_RENDER.
  *
  * ---------------------------------------------------------------------------
- * MEMORY: this is the one part of the library that is not free.
+ * MEMORY: a screen is not a document.
  *
- * The container reader never allocates and nothing it does scales with member
- * size. Rendering breaks both of those, and it is worth being blunt about why:
+ * md4c parses a contiguous buffer, so whatever you ask it to parse has to be
+ * in RAM. That is *not* the same as needing the whole document: a reader draws
+ * thirty lines at a time and has no business holding a novel to do it.
  *
- *   - **md4c needs the whole document in one contiguous buffer.** There is no
- *     streaming entry point. So the caller supplies that buffer - the library
- *     will not allocate it behind your back, and its size is
- *     mcdf_micro_render_size(), which is exactly the size of content.md.
- *   - **md4c allocates internally** (its block stack, mark chain and reference
- *     definitions). A build with this gate on therefore needs a heap, where a
- *     Core-only build needs none at all.
+ * So there are two ways in, and the constrained one is the general one:
  *
- * Neither is avoidable with a real CommonMark parser, and the gate exists so a
- * part that cannot afford them does not pay: MCDF_MICRO_ENABLE_RENDER=OFF is a
- * reader that still opens containers, reads members and checks documents.
+ *   - mcdf_micro_render() parses the whole of content.md at once. Simple, and
+ *     right on a host or a part with PSRAM to spare.
+ *   - mcdf_micro_render_begin()/_next() walk the document a window at a time.
+ *     The buffer only has to hold the largest single top-level block - a
+ *     paragraph, a list, a code block - not the document.
+ *
+ * The windowed form is exact, not an approximation. CommonMark has one
+ * construct that reaches across a document, the link reference definition
+ * (`[ref]: /url`), and _begin() collects those in a streaming pre-pass and
+ * carries them into every window. A definition emits no events of its own, so
+ * a caller sees precisely the window's own events with its links resolved -
+ * the same events, in the same order, as parsing the whole document would
+ * produce.
+ *
+ * What does not change: the caller owns the buffer, and md4c allocates
+ * internally (its block stack and mark chain), so a build with this gate on
+ * needs a heap where a Core-only build needs none. That last one is not
+ * avoidable with a real CommonMark parser, and it is why the gate exists.
  */
 
 #include <stddef.h>
@@ -174,15 +184,18 @@ typedef struct mcdf_micro_render_callbacks {
               size_t len);
 } mcdf_micro_render_callbacks;
 
-/* ------------------------------------------------------------------- entry */
+/* --------------------------------------------------- whole document at once */
 
-/* Bytes the document buffer must hold: the size of content.md, exactly.
+/* Bytes needed to parse content.md in one go: its size, exactly. Useful for
+ * deciding whether the simple path fits; a device that knows it does not
+ * should use the windowed form and never ask.
+ *
  * E_NOT_FOUND when there is no content.md, E_CONTENT_SEALED when it is
  * ciphertext. */
 mcdf_micro_status mcdf_micro_render_size(mcdf_micro_reader *reader,
                                          size_t *out);
 
-/* Reads content.md into `buffer` and streams it to `cb`.
+/* Reads content.md into `buffer` and streams all of it to `cb`.
  *
  * `buffer` must be at least mcdf_micro_render_size() bytes; a smaller one is
  * E_RANGE rather than a truncated parse. The buffer belongs to the caller
@@ -196,6 +209,59 @@ mcdf_micro_status mcdf_micro_render(mcdf_micro_reader *reader, void *buffer,
                                     size_t buffer_len,
                                     const mcdf_micro_render_callbacks *cb,
                                     void *ctx);
+
+/* ------------------------------------------------------ a window at a time */
+
+/* Walks content.md in windows, for a caller whose RAM is sized by its screen
+ * rather than by the documents it may be handed.
+ *
+ * The state is public so it can live on the stack - the core never allocates -
+ * but the fields are an implementation detail; only the two calls below may
+ * touch them. */
+typedef struct mcdf_micro_render_iter {
+  mcdf_micro_reader *reader;
+  unsigned char     *buffer;
+  size_t             buffer_len;
+  size_t             prefix_len; /* carried link reference definitions */
+  uint64_t           at;         /* next byte of content.md to parse */
+  uint64_t           size;       /* content.md's total size */
+  int                started;
+} mcdf_micro_render_iter;
+
+/* Prepares a walk over content.md.
+ *
+ * Streams the document once to collect its link reference definitions and
+ * copies them to the front of `buffer`, where they stay for the whole walk -
+ * that is what makes a windowed parse produce the same events as a whole
+ * document one. `buffer` must outlive the iterator and must not be touched
+ * between calls.
+ *
+ * E_RANGE if the definitions alone do not leave usable room, and the same
+ * E_NOT_FOUND / E_CONTENT_SEALED as the whole-document form. */
+mcdf_micro_status mcdf_micro_render_begin(mcdf_micro_reader *reader,
+                                          void *buffer, size_t buffer_len,
+                                          mcdf_micro_render_iter *iter);
+
+/* Streams the next window's events and advances.
+ *
+ * Sets `*done` non-zero when the document is exhausted, at which point no
+ * events were emitted for this call. A window ends at a top-level block
+ * boundary, never inside one, so a list, block quote or fenced code block is
+ * never split across two windows - and the events are identical to those a
+ * whole-document parse would produce.
+ *
+ * The consequence of that guarantee is the buffer's real requirement: it must
+ * hold the largest single top-level block, not the document. A block that does
+ * not fit is E_RANGE - the caller needs a bigger buffer, and is told so rather
+ * than handed a truncated parse.
+ *
+ * On any error the walk stops and cannot be resumed. Events already delivered
+ * by *earlier* calls stand - they were correct when they were made, and a
+ * stream cannot un-emit - but this call emits nothing before it fails: the
+ * window is checked whole before a byte of it is parsed. */
+mcdf_micro_status mcdf_micro_render_next(mcdf_micro_render_iter *iter,
+                                         const mcdf_micro_render_callbacks *cb,
+                                         void *ctx, int *done);
 
 #ifdef __cplusplus
 } /* extern "C" */

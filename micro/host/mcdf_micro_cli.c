@@ -24,6 +24,7 @@
  * container, which is the reason the kit publishes every vector packed. */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -322,7 +323,10 @@ static int ev_text(void *ctx, mcdf_micro_text_type type, const char *text,
   return 0;
 }
 
-static int cmd_events(const char *path) {
+/* `window` is a device-sized buffer on purpose: it is how the windowed walk
+ * gets exercised by hand, and it is the configuration a reader actually runs
+ * in. The whole-document path is the one that needs a host's memory. */
+static int cmd_events(const char *path, size_t window) {
   static unsigned char g_doc[1u << 20]; /* 1 MiB: a host, not a device */
   FILE *fp = NULL;
   mcdf_micro_source src;
@@ -345,7 +349,7 @@ static int cmd_events(const char *path) {
   }
 
   /* The document buffer is the caller's, always - the library will not
-   * allocate it, and its size is the size of content.md. */
+   * allocate it. */
   st = mcdf_micro_render_size(reader, &need);
   if (st == MCDF_MICRO_OK && need > sizeof g_doc) st = MCDF_MICRO_E_RANGE;
   if (st != MCDF_MICRO_OK) {
@@ -362,7 +366,17 @@ static int cmd_events(const char *path) {
   cb.text = ev_text;
 
   g_depth = 0;
-  st = mcdf_micro_render(reader, g_doc, sizeof g_doc, &cb, NULL);
+  if (window == 0) {
+    st = mcdf_micro_render(reader, g_doc, sizeof g_doc, &cb, NULL);
+  } else {
+    mcdf_micro_render_iter iter;
+    int done = 0;
+    if (window > sizeof g_doc) window = sizeof g_doc;
+    st = mcdf_micro_render_begin(reader, g_doc, window, &iter);
+    while (st == MCDF_MICRO_OK && !done) {
+      st = mcdf_micro_render_next(&iter, &cb, NULL, &done);
+    }
+  }
   mcdf_micro_close(reader);
   fclose(fp);
   if (st != MCDF_MICRO_OK) {
@@ -394,13 +408,16 @@ static int usage(FILE *to) {
       "  mcdf_micro_cli validate <container.mcdf> [--profile P]\n"
       "  mcdf_micro_cli manifest <container.mcdf>\n"
       "  mcdf_micro_cli render   <html|text> <container.mcdf>\n"
-      "  mcdf_micro_cli events   <container.mcdf>\n"
+      "  mcdf_micro_cli events   <container.mcdf> [--window N]\n"
       "  mcdf_micro_cli features\n"
       "\n"
       "  P is core|integrity|signed|encrypted|render (default: integrity).\n"
       "  Profiles and verbs this build does not implement - render always, and\n"
       "  integrity when its gate is off - report E_UNIMPLEMENTED, never a pass.\n"
-      "  Containers are read in the TAR serialization only (spec 3).\n",
+      "  Containers are read in the TAR serialization only (spec 3).\n"
+      "  --window N walks content.md N bytes at a time, the way a device with\n"
+      "  no room for the whole document does. The events are the same either\n"
+      "  way; N only has to hold the largest single top-level block.\n",
       to);
   return to == stderr ? 2 : 0;
 }
@@ -408,6 +425,7 @@ static int usage(FILE *to) {
 int main(int argc, char **argv) {
   const char *profile = "integrity";
   const char *container = NULL;
+  size_t window = 0;
   int i;
 
 #if defined(_WIN32)
@@ -439,6 +457,8 @@ int main(int argc, char **argv) {
       profile = argv[++i];
     } else if (strncmp(argv[i], "--profile=", 10) == 0) {
       profile = argv[i] + 10;
+    } else if (strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
+      window = (size_t)strtoul(argv[++i], NULL, 10);
     } else if (argv[i][0] == '-') {
       fprintf(stderr, "error: unknown option: %s\n", argv[i]);
       return 2;
@@ -456,7 +476,7 @@ int main(int argc, char **argv) {
 
   if (strcmp(argv[1], "validate") == 0) return cmd_validate(container, profile);
   if (strcmp(argv[1], "manifest") == 0) return cmd_manifest(container);
-  if (strcmp(argv[1], "events") == 0) return cmd_events(container);
+  if (strcmp(argv[1], "events") == 0) return cmd_events(container, window);
 
   fprintf(stderr, "error: unknown command: %s\n", argv[1]);
   return usage(stderr);

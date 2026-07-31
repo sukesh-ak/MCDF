@@ -1524,6 +1524,21 @@ static void test_render(void) {
   CHECK(need == 0);
   CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_E_DISABLED);
   CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) == 0);
+  {
+    mcdf_micro_render_iter it;
+    int done = 0;
+    mcdf_micro_render_callbacks cb;
+    cb.enter_block = t_enter_block;
+    cb.leave_block = t_leave_block;
+    cb.enter_span = t_enter_span;
+    cb.leave_span = t_leave_span;
+    cb.text = t_text;
+    CHECK_ST(mcdf_micro_render_begin(r, doc, sizeof doc, &it),
+             MCDF_MICRO_E_DISABLED);
+    CHECK_ST(mcdf_micro_render_next(&it, &cb, NULL, &done),
+             MCDF_MICRO_E_DISABLED);
+    CHECK(done);
+  }
   (void)ev_render;
 #else
   CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) != 0);
@@ -1657,6 +1672,162 @@ static void test_render(void) {
   tar_source(&src, &mem);
   CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
   CHECK_ST(mcdf_micro_render_size(r, &need), MCDF_MICRO_E_NOT_FOUND);
+
+  /* ---- a window at a time -------------------------------------------- */
+
+  /* The claim the windowed form has to earn: for a document a device cannot
+   * hold, walking it in windows produces *the same events in the same order*
+   * as parsing it whole. Anything less and a reader shows something different
+   * depending on how much RAM it happened to have. */
+  {
+    static char whole[sizeof g_events];
+    static unsigned char win[256];
+    mcdf_micro_render_iter it;
+    mcdf_micro_render_callbacks cb;
+    size_t guard;
+    int done = 0;
+
+    /* Deliberately awkward: a list and a block quote that must not be split,
+     * a fenced block containing what looks like a boundary, and a link whose
+     * reference definition sits at the very end of the document. */
+    tar_reset();
+    tar_add("content.md",
+            "# One {#one}\n"
+            "\n"
+            "First paragraph, long enough to matter for a small window.\n"
+            "\n"
+            "- alpha\n"
+            "- beta\n"
+            "\n"
+            "- gamma\n"
+            "\n"
+            "> quoted line one\n"
+            ">\n"
+            "> quoted line two\n"
+            "\n"
+            "```\n"
+            "not a boundary\n"
+            "\n"
+            "still inside the fence\n"
+            "```\n"
+            "\n"
+            "## Two {#two}\n"
+            "\n"
+            "A paragraph using [the link][ref] defined at the end.\n"
+            "\n"
+            "Another paragraph so the tail is not the interesting case.\n"
+            "\n"
+            "[ref]: https://example.org/target\n");
+    tar_end();
+    tar_source(&src, &mem);
+    CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+
+    CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+    memcpy(whole, g_events, g_events_len + 1);
+    /* The reference definition resolved, and emitted nothing of its own. */
+    CHECK(strstr(whole, "[+link extern=https://example.org/target]") != NULL);
+
+    cb.enter_block = t_enter_block;
+    cb.leave_block = t_leave_block;
+    cb.enter_span = t_enter_span;
+    cb.leave_span = t_leave_span;
+    cb.text = t_text;
+
+    g_events_len = 0;
+    g_events[0] = '\0';
+    g_event_count = 0;
+    CHECK_ST(mcdf_micro_render_begin(r, win, sizeof win, &it), MCDF_MICRO_OK);
+    for (guard = 0; guard < 64 && !done; ++guard) {
+      CHECK_ST(mcdf_micro_render_next(&it, &cb, NULL, &done), MCDF_MICRO_OK);
+    }
+    CHECK(done);
+    /* More than one window, or the test proves nothing. */
+    CHECK(guard > 1);
+    if (strcmp(g_events, whole) != 0) {
+      size_t d = 0, k, from;
+      while (whole[d] != '\0' && whole[d] == g_events[d]) ++d;
+      from = d > 40 ? d - 40 : 0;
+      printf("  diverge at %lu\n", (unsigned long)d);
+      for (k = 0; k < 2; ++k) {
+        const char *s = k == 0 ? whole : g_events;
+        size_t i;
+        printf("    %-9s", k == 0 ? "whole:" : "windowed:");
+        for (i = from; i < from + 120 && s[i] != '\0'; ++i) {
+          if (s[i] == '\n') fputs("\\n", stdout);
+          else fputc(s[i], stdout);
+        }
+        printf("\n");
+      }
+    }
+    CHECK(strcmp(g_events, whole) == 0);
+
+    /* The buffer's real requirement is the largest single top-level block, not
+     * the document - so one paragraph longer than the buffer is the case that
+     * cannot be served, and it is told so rather than handed a parse of
+     * something the document does not contain. */
+    {
+      static unsigned char tiny[128];
+      static char para[400];
+      mcdf_micro_render_iter small;
+      int small_done = 0;
+      mcdf_micro_status st2;
+
+      memset(para, 'x', sizeof para - 2);
+      para[sizeof para - 2] = '\n';
+      para[sizeof para - 1] = '\0';
+      tar_reset();
+      tar_add("content.md", para);
+      tar_end();
+      tar_source(&src, &mem);
+      CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r),
+               MCDF_MICRO_OK);
+
+      st2 = mcdf_micro_render_begin(r, tiny, sizeof tiny, &small);
+      CHECK_ST(st2, MCDF_MICRO_OK);
+      CHECK_ST(mcdf_micro_render_next(&small, &cb, NULL, &small_done),
+               MCDF_MICRO_E_RANGE);
+
+      /* ...and the same document walks fine once the buffer can hold that
+       * block - which is the whole point: the bound is the block, not the
+       * document, and it is the caller's to satisfy. */
+      CHECK_ST(mcdf_micro_render_begin(r, doc, sizeof doc, &small),
+               MCDF_MICRO_OK);
+      g_events_len = 0;
+      g_events[0] = '\0';
+      small_done = 0;
+      CHECK_ST(mcdf_micro_render_next(&small, &cb, NULL, &small_done),
+               MCDF_MICRO_OK);
+      CHECK(small_done);
+      CHECK(strncmp(g_events, "[+doc][+p]xxx", 13) == 0);
+    }
+
+    /* A document with no reference definitions carries no prefix at all. */
+    tar_reset();
+    tar_add("content.md", "# Plain {#p}\n\nJust prose.\n");
+    tar_end();
+    tar_source(&src, &mem);
+    CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+    CHECK_ST(mcdf_micro_render_begin(r, win, sizeof win, &it), MCDF_MICRO_OK);
+    CHECK(it.prefix_len == 0);
+    g_events_len = 0;
+    g_events[0] = '\0';
+    done = 0;
+    CHECK_ST(mcdf_micro_render_next(&it, &cb, NULL, &done), MCDF_MICRO_OK);
+    CHECK(done);
+    CHECK(strcmp(g_events, "[+doc][+h:1]Plain[-h#p][+p]Just prose.[-p][-doc]") ==
+          0);
+
+    /* Sealed content is refused here too - the refusal belongs to the document,
+     * not to which entry point asked. */
+    tar_reset();
+    tar_add("content.md", "ciphertext");
+    tar_add("encryption/policy.yaml", "encrypted_files:\n  - content.md\n");
+    tar_end();
+    tar_source(&src, &mem);
+    CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+    CHECK_ST(mcdf_micro_render_begin(r, win, sizeof win, &it),
+             MCDF_MICRO_E_CONTENT_SEALED);
+  }
 
   /* A real archive the reference runtime produced, end to end. */
   {
