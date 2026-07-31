@@ -33,6 +33,7 @@
 
 #include "jcs.h"
 #include "mcdf_micro/mcdf_micro.h"
+#include "mcdf_micro/mcdf_micro_render.h"
 #include "mcdf_micro/mcdf_micro_verify.h"
 
 /* Sized for the conformance vectors and any document a host would hand this,
@@ -206,6 +207,171 @@ static int cmd_manifest(const char *path) {
   return 0;
 }
 
+/* ------------------------------------------------------------------ events */
+
+/* Prints the block/span event stream. Not a renderer and not scored by the
+ * kit - it is how a human (or a layout engine's author) sees what the stream
+ * actually contains, and how the tests check it without a screen. */
+
+static const char *kBlockName[] = {"doc",  "quote", "ul", "ol", "li",
+                                   "hr",   "h",     "code", "p"};
+static const char *kSpanName[] = {"em", "strong", "link", "image", "code"};
+static const char *kTextName[] = {"normal", "nullchar", "br",
+                                  "softbr", "entity",   "code"};
+
+static int g_depth;
+
+static void indent(void) {
+  int i;
+  for (i = 0; i < g_depth; ++i) fputs("  ", stdout);
+}
+
+/* Body text can contain anything; keep one event on one line. */
+static void print_slice(const char *text, size_t len) {
+  size_t i;
+  for (i = 0; i < len; ++i) {
+    const unsigned char c = (unsigned char)text[i];
+    if (c == '\n')      fputs("\\n", stdout);
+    else if (c == '\r') fputs("\\r", stdout);
+    else if (c == '\t') fputs("\\t", stdout);
+    else if (c < 0x20)  printf("\\x%02x", c);
+    else                fputc((int)c, stdout);
+  }
+}
+
+static int ev_enter_block(void *ctx, mcdf_micro_block type, const void *detail) {
+  (void)ctx;
+  indent();
+  printf("+%s", kBlockName[type]);
+  if (type == MCDF_MICRO_BLOCK_H && detail != NULL) {
+    printf(" level=%d", ((const mcdf_micro_heading_detail *)detail)->level);
+  } else if ((type == MCDF_MICRO_BLOCK_UL || type == MCDF_MICRO_BLOCK_OL) &&
+             detail != NULL) {
+    const mcdf_micro_list_detail *d = (const mcdf_micro_list_detail *)detail;
+    printf(" tight=%d mark=%c", d->is_tight, d->mark ? d->mark : '?');
+    if (type == MCDF_MICRO_BLOCK_OL) printf(" start=%u", d->start);
+  } else if (type == MCDF_MICRO_BLOCK_CODE && detail != NULL) {
+    const mcdf_micro_code_detail *d = (const mcdf_micro_code_detail *)detail;
+    printf(" fence=%c info=\"", d->fence ? d->fence : '-');
+    print_slice(d->info.text, d->info.len);
+    fputc('"', stdout);
+  }
+  fputc('\n', stdout);
+  ++g_depth;
+  return 0;
+}
+
+static int ev_leave_block(void *ctx, mcdf_micro_block type, const void *detail) {
+  (void)ctx;
+  if (g_depth > 0) --g_depth;
+  indent();
+  printf("-%s", kBlockName[type]);
+  /* The anchor is only known here: it sits at the end of the heading's text. */
+  if (type == MCDF_MICRO_BLOCK_H && detail != NULL) {
+    const mcdf_micro_heading_detail *d =
+        (const mcdf_micro_heading_detail *)detail;
+    if (d->id.len > 0) {
+      fputs(" id=", stdout);
+      print_slice(d->id.text, d->id.len);
+    }
+  }
+  fputc('\n', stdout);
+  return 0;
+}
+
+static void print_link(const void *detail) {
+  const mcdf_micro_link_detail *d = (const mcdf_micro_link_detail *)detail;
+  if (d == NULL) return;
+  fputs(" href=\"", stdout);
+  print_slice(d->href.text, d->href.len);
+  printf("\" member=%d", d->is_member);
+  if (d->title.len > 0) {
+    fputs(" title=\"", stdout);
+    print_slice(d->title.text, d->title.len);
+    fputc('"', stdout);
+  }
+}
+
+static int ev_enter_span(void *ctx, mcdf_micro_span type, const void *detail) {
+  (void)ctx;
+  indent();
+  printf("+%s", kSpanName[type]);
+  if (type == MCDF_MICRO_SPAN_LINK || type == MCDF_MICRO_SPAN_IMAGE) {
+    print_link(detail);
+  }
+  fputc('\n', stdout);
+  ++g_depth;
+  return 0;
+}
+
+static int ev_leave_span(void *ctx, mcdf_micro_span type, const void *detail) {
+  (void)ctx; (void)detail;
+  if (g_depth > 0) --g_depth;
+  indent();
+  printf("-%s\n", kSpanName[type]);
+  return 0;
+}
+
+static int ev_text(void *ctx, mcdf_micro_text_type type, const char *text,
+                   size_t len) {
+  (void)ctx;
+  indent();
+  printf("%s \"", kTextName[type]);
+  print_slice(text, len);
+  fputs("\"\n", stdout);
+  return 0;
+}
+
+static int cmd_events(const char *path) {
+  static unsigned char g_doc[1u << 20]; /* 1 MiB: a host, not a device */
+  FILE *fp = NULL;
+  mcdf_micro_source src;
+  mcdf_micro_reader *reader = NULL;
+  mcdf_micro_render_callbacks cb;
+  mcdf_micro_status st;
+  size_t need = 0;
+
+  if ((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) == 0) {
+    fprintf(stderr,
+            "error: E_UNIMPLEMENTED - the event stream needs the render gate\n");
+    return 1;
+  }
+  if (!open_container(path, &fp, &src)) return 1;
+  st = mcdf_micro_open(&src, g_arena, sizeof g_arena, &reader);
+  if (st != MCDF_MICRO_OK) {
+    fprintf(stderr, "error: %s: %s\n", path, mcdf_micro_status_str(st));
+    fclose(fp);
+    return 1;
+  }
+
+  /* The document buffer is the caller's, always - the library will not
+   * allocate it, and its size is the size of content.md. */
+  st = mcdf_micro_render_size(reader, &need);
+  if (st == MCDF_MICRO_OK && need > sizeof g_doc) st = MCDF_MICRO_E_RANGE;
+  if (st != MCDF_MICRO_OK) {
+    fprintf(stderr, "error: %s: %s\n", path, mcdf_micro_status_str(st));
+    mcdf_micro_close(reader);
+    fclose(fp);
+    return 1;
+  }
+
+  cb.enter_block = ev_enter_block;
+  cb.leave_block = ev_leave_block;
+  cb.enter_span = ev_enter_span;
+  cb.leave_span = ev_leave_span;
+  cb.text = ev_text;
+
+  g_depth = 0;
+  st = mcdf_micro_render(reader, g_doc, sizeof g_doc, &cb, NULL);
+  mcdf_micro_close(reader);
+  fclose(fp);
+  if (st != MCDF_MICRO_OK) {
+    fprintf(stderr, "error: %s\n", mcdf_micro_status_str(st));
+    return 1;
+  }
+  return 0;
+}
+
 static int cmd_features(void) {
   const uint32_t bits = mcdf_micro_features();
   printf("mcdf_micro %d.%d.%d (mcdf %s)\n", MCDF_MICRO_VERSION_MAJOR,
@@ -228,6 +394,7 @@ static int usage(FILE *to) {
       "  mcdf_micro_cli validate <container.mcdf> [--profile P]\n"
       "  mcdf_micro_cli manifest <container.mcdf>\n"
       "  mcdf_micro_cli render   <html|text> <container.mcdf>\n"
+      "  mcdf_micro_cli events   <container.mcdf>\n"
       "  mcdf_micro_cli features\n"
       "\n"
       "  P is core|integrity|signed|encrypted|render (default: integrity).\n"
@@ -289,6 +456,7 @@ int main(int argc, char **argv) {
 
   if (strcmp(argv[1], "validate") == 0) return cmd_validate(container, profile);
   if (strcmp(argv[1], "manifest") == 0) return cmd_manifest(container);
+  if (strcmp(argv[1], "events") == 0) return cmd_events(container);
 
   fprintf(stderr, "error: unknown command: %s\n", argv[1]);
   return usage(stderr);

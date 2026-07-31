@@ -71,7 +71,7 @@ document indexes in a few hundred bytes regardless of how large its assets are.
 | `metadata.yaml` | top-level scalars and the `authors:` name list — enough for a library screen |
 | `manifest.json` | recorded hashes by path, top-level fields, iteration over `files` |
 | `schema.yaml` | the `sections:` list — each `id` and whether it is `required` |
-| `content.md` | heading anchors: the `{#id}` that spec §4.2 binds a section to |
+| `content.md` | heading anchors: the `{#id}` that spec §4.2 binds a section to, and — behind the render gate — the whole document as a block/span event stream |
 | `encryption/policy.yaml` | `encrypted_files` alone — which members are ciphertext and must not be parsed |
 
 The YAML and JSON readers are deliberately not general parsers. They walk the
@@ -143,6 +143,7 @@ the conformance vocabulary are the same vocabulary.
 |---|---|---|
 | *(baseline)* | USTAR index, member reads, metadata, schema, anchors, Core validation | always |
 | `MCDF_MICRO_ENABLE_INTEGRITY` | SHA-256 and `manifest.json` verification | **on** |
+| `MCDF_MICRO_ENABLE_RENDER` | md4c and the block/span event stream | **on** |
 
 Four rules keep them from rotting:
 
@@ -161,6 +162,24 @@ Four rules keep them from rotting:
    is checked rather than trusted: the build fails if any file that participates
    in a validity decision includes md4c, so heading anchors cannot quietly start
    being resolved by a parser that only exists in some configurations.
+
+### What Render costs
+
+Worth knowing before you turn it on, because it is the one gate that changes the
+library's memory story rather than just its size:
+
+- **md4c needs the whole document in one contiguous buffer.** There is no
+  streaming entry point. The *caller* supplies that buffer — the library will
+  not allocate it behind your back — and its size is `mcdf_micro_render_size()`,
+  which is exactly the size of `content.md`.
+- **md4c allocates internally.** A build with this gate on needs a heap, where a
+  Core-only build needs none at all.
+- **It is about 41 KB of `.text`** at `-Os` — three times the rest of the
+  library put together.
+
+None of that is avoidable with a real CommonMark parser, which is why the gate
+exists: `MCDF_MICRO_ENABLE_RENDER=OFF` is still a reader that opens containers,
+reads members, and checks documents at Core and Integrity.
 
 ## Building
 
@@ -210,9 +229,44 @@ scanners. Both are C, because what ships is the C99 build.
 sh conformance/run.sh ./build/micro/mcdf-micro-cli
 ```
 
+## Reading a document
+
+Behind `MCDF_MICRO_ENABLE_RENDER`, `content.md` arrives as a block/span event
+stream a layout engine can consume — no fonts, no panels, no pixels, and no
+md4c type in sight:
+
+```c
+static int on_block(void *ctx, mcdf_micro_block type, const void *detail) {
+  if (type == MCDF_MICRO_BLOCK_H) {
+    const mcdf_micro_heading_detail *h = detail;  /* on leave: h->id is set */
+    ...
+  }
+  return 0;                                       /* non-zero stops the parse */
+}
+
+size_t need;
+mcdf_micro_render_size(r, &need);                 /* == sizeof content.md */
+mcdf_micro_render(r, my_buffer, my_buffer_len, &callbacks, ctx);
+```
+
+Three things it does that a bare parser would not: an image or link
+destination arrives with a flag saying whether it names a **member of this
+container**, so you can read the bytes with `mcdf_micro_read_at()` instead of
+interpreting the path (and know not to fetch an external URL — spec §4.1); a
+heading's `{#id}` is **stripped from its text** and reported as an id (spec
+§10.4); and a sealed `content.md` is **refused** rather than parsed, because
+ciphertext fed to a CommonMark parser yields confident nonsense rather than an
+error (spec §6).
+
+The heading id is only valid on *leave*. The anchor sits at the end of the
+heading, so it cannot be known when the heading opens — and reporting it
+honestly beats buffering the document to pretend otherwise.
+
+`mcdf-micro-cli events <container.mcdf>` prints the stream, which is the
+quickest way to see what a document actually contains.
+
 ## Status
 
-Core and Integrity are complete, host-buildable and scored by the conformance
-kit. Still to come, in order: the Markdown event stream behind
-`MCDF_MICRO_ENABLE_RENDER`; the ESP-IDF port under `port/esp-idf/`; signature
-verification as an injected primitive.
+Core, Integrity and the Render event stream are complete, host-buildable and
+scored by the conformance kit. Still to come, in order: the ESP-IDF port under
+`port/esp-idf/`; signature verification as an injected primitive.

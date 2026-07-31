@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "mcdf_micro/mcdf_micro.h"
+#include "mcdf_micro/mcdf_micro_render.h"
 #include "mcdf_micro/mcdf_micro_verify.h"
 
 namespace {
@@ -130,14 +131,40 @@ int main() {
 #if defined(MCDF_MICRO_HAS_INTEGRITY)
   // FIPS 180-4: SHA-256("abc") begins ba 78 16 bf.
   if (hashed != kOk || digest[0] != 0xBA || digest[1] != 0x78) return 1;
-  const char* build = "core+integrity";
+  const char* integrity = "+integrity";
 #else
   if (hashed != MCDF_MICRO_E_DISABLED) return 1;
-  const char* build = "core";
+  const char* integrity = "";
 #endif
+
+  // The render surface, same deal: it must compile in every configuration, and
+  // the aggregate initialiser below is exactly the shape a C++ caller writes.
+  // A designated initialiser here would be the thing that quietly breaks the
+  // C99 build, which is why this gate exists at all.
+  mcdf_micro_render_callbacks callbacks{};
+  callbacks.text = nullptr;
+  std::size_t doc_bytes = 0;
+  // The empty container has no content.md, so this cannot succeed either way —
+  // what is being checked is that it links and returns a status, not a value.
+  const mcdf_micro_status rendered =
+      mcdf_micro_render_size(reader.get(), &doc_bytes);
+#if defined(MCDF_MICRO_HAS_RENDER)
+  if (rendered != MCDF_MICRO_E_NOT_FOUND) return 1;
+  const char* render = "+render";
+#else
+  if (rendered != MCDF_MICRO_E_DISABLED) return 1;
+  const char* render = "";
+#endif
+  if (mcdf_micro_render(reader.get(), nullptr, 0, &callbacks, nullptr) == kOk) {
+    return 1;
+  }
+
+  const std::string build =
+      std::string("core") + integrity + render;
 
   std::printf("mcdf_micro C++23 header gate: ok (v%d.%d.%d, mcdf %s, %s)\n",
               MCDF_MICRO_VERSION_MAJOR, MCDF_MICRO_VERSION_MINOR,
-              MCDF_MICRO_VERSION_PATCH, MCDF_MICRO_MCDF_VERSION, build);
+              MCDF_MICRO_VERSION_PATCH, MCDF_MICRO_MCDF_VERSION,
+              build.c_str());
   return 0;
 }

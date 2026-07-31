@@ -23,10 +23,17 @@ set(MCDF_MICRO_UNGATED_SOURCES
   src/anchors.c
   src/validate.c)
 
+# The gated ones. Each keeps its stubs in the same translation unit, so a
+# disabled entry point still links and returns E_DISABLED; what a gate removes
+# is the implementation, and for render that includes md4c itself, which is
+# added to the source list only when the gate is on.
 set(MCDF_MICRO_SOURCES
   ${MCDF_MICRO_UNGATED_SOURCES}
   src/sha256.c
-  src/verify.c)
+  src/verify.c
+  render/render.c)
+
+set(MCDF_MICRO_MD4C ${CMAKE_CURRENT_SOURCE_DIR}/render/md4c/md4c.c)
 
 # ---- structural guard: format decisions must not depend on a gate ------------
 #
@@ -69,18 +76,32 @@ endforeach()
 # library about what was compiled, or MCDF_MICRO_HAS_INTEGRITY promises a
 # capability that is not linked in.
 #
-# Only the gates whose code exists are declared. SIGNED and RENDER arrive with
-# their implementations; an option that toggled nothing would be a lie the
-# build system tells.
+# Only the gates whose code exists are declared. SIGNED arrives with its
+# implementation; an option that toggled nothing would be a lie the build
+# system tells.
+#
+# RENDER is the expensive one, and not only in flash: md4c needs the whole of
+# content.md in one contiguous buffer and allocates internally, so a build with
+# it on requires a heap where a Core-only build requires none. That is the
+# trade the gate exists to let a part decline.
 option(MCDF_MICRO_ENABLE_INTEGRITY
        "SHA-256 hashing and manifest.json verification (Integrity profile)" ON)
+option(MCDF_MICRO_ENABLE_RENDER
+       "md4c and the block/span event stream (Render profile)" ON)
 
 if(ESP_PLATFORM)
+  if(MCDF_MICRO_ENABLE_RENDER)
+    list(APPEND MCDF_MICRO_SOURCES ${MCDF_MICRO_MD4C})
+  endif()
   idf_component_register(
     SRCS ${MCDF_MICRO_SOURCES}
-    INCLUDE_DIRS include)
+    INCLUDE_DIRS include
+    PRIV_INCLUDE_DIRS src render/md4c)
   if(MCDF_MICRO_ENABLE_INTEGRITY)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MCDF_MICRO_ENABLE_INTEGRITY)
+  endif()
+  if(MCDF_MICRO_ENABLE_RENDER)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC MCDF_MICRO_ENABLE_RENDER)
   endif()
   return()
 endif()
@@ -92,20 +113,42 @@ if(NOT DEFINED PROJECT_NAME)
   set(MCDF_MICRO_STANDALONE TRUE)
 endif()
 
+# md4c is third-party and unmodified, and render/md4c/README.md says it stays
+# that way - so it is compiled without our warning set. Warnings we have
+# forbidden ourselves to act on are noise, and noise is what gets a real
+# warning ignored. Ours still apply to every file we wrote.
+if(MSVC)
+  set(MCDF_MICRO_VENDOR_QUIET /W0)
+else()
+  set(MCDF_MICRO_VENDOR_QUIET -w)
+endif()
+set_source_files_properties(${MCDF_MICRO_MD4C}
+  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  PROPERTIES COMPILE_OPTIONS "${MCDF_MICRO_VENDOR_QUIET}")
+
 # One library, one configuration. Called once for the target consumers link,
 # and once per extra gate configuration the matrix keeps alive.
-function(mcdf_micro_add_library target integrity)
-  add_library(${target} STATIC ${MCDF_MICRO_SOURCES})
+function(mcdf_micro_add_library target integrity render)
+  set(sources ${MCDF_MICRO_SOURCES})
+  if(render)
+    list(APPEND sources ${MCDF_MICRO_MD4C})
+  endif()
+
+  add_library(${target} STATIC ${sources})
   target_include_directories(${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:include>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/render/md4c)
   set_target_properties(${target} PROPERTIES
     C_STANDARD 99
     C_STANDARD_REQUIRED ON
     C_EXTENSIONS OFF)
   if(integrity)
     target_compile_definitions(${target} PUBLIC MCDF_MICRO_ENABLE_INTEGRITY)
+  endif()
+  if(render)
+    target_compile_definitions(${target} PUBLIC MCDF_MICRO_ENABLE_RENDER)
   endif()
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4)
@@ -115,7 +158,8 @@ function(mcdf_micro_add_library target integrity)
   endif()
 endfunction()
 
-mcdf_micro_add_library(mcdf_micro ${MCDF_MICRO_ENABLE_INTEGRITY})
+mcdf_micro_add_library(mcdf_micro
+  ${MCDF_MICRO_ENABLE_INTEGRITY} ${MCDF_MICRO_ENABLE_RENDER})
 add_library(mcdf::micro ALIAS mcdf_micro)
 
 # Tests follow the parent build's switch when there is one. Both need the
@@ -192,29 +236,36 @@ if(MCDF_MICRO_BUILD_TESTS AND
   # gate that turns out to be needed outside it. The configuration the options
   # already produced is not built twice.
   #
-  # Two configurations exist because two gates do. When the render gate lands,
-  # `core-render` and `all-on` go in the foreach below and gain a
-  # `config_render` sibling to `config_integrity` - and that is what makes the
-  # anchor assertions in host/tests/test_micro.c run against a build that has
-  # md4c in it. Until then nothing compiles the render-on configuration, so
-  # nothing can catch it disagreeing about which documents are valid. This is
-  # the step, not an optimisation to skip.
-  if(MCDF_MICRO_ENABLE_INTEGRITY)
+  # `core-render` and `all-on` are what make the anchor assertions in
+  # host/tests/test_micro.c run against a build that has md4c in it. Without
+  # them nothing compiles the render-on configuration, so nothing could catch
+  # it disagreeing with a Core-only build about which documents are valid -
+  # which is the one thing a feature gate may never do.
+  if(MCDF_MICRO_ENABLE_INTEGRITY AND MCDF_MICRO_ENABLE_RENDER)
+    set(MCDF_MICRO_PRIMARY_CONFIG all-on)
+  elseif(MCDF_MICRO_ENABLE_INTEGRITY)
     set(MCDF_MICRO_PRIMARY_CONFIG core-integrity)
+  elseif(MCDF_MICRO_ENABLE_RENDER)
+    set(MCDF_MICRO_PRIMARY_CONFIG core-render)
   else()
     set(MCDF_MICRO_PRIMARY_CONFIG core)
   endif()
 
-  foreach(config core core-integrity)
+  foreach(config core core-integrity core-render all-on)
     if("${config}" STREQUAL "${MCDF_MICRO_PRIMARY_CONFIG}")
       continue()
     endif()
-    if("${config}" STREQUAL "core-integrity")
+    if("${config}" STREQUAL "core-integrity" OR "${config}" STREQUAL "all-on")
       set(config_integrity ON)
     else()
       set(config_integrity OFF)
     endif()
-    mcdf_micro_add_library(mcdf_micro_${config} ${config_integrity})
+    if("${config}" STREQUAL "core-render" OR "${config}" STREQUAL "all-on")
+      set(config_render ON)
+    else()
+      set(config_render OFF)
+    endif()
+    mcdf_micro_add_library(mcdf_micro_${config} ${config_integrity} ${config_render})
     mcdf_micro_add_harness(mcdf_micro_${config} "-${config}")
   endforeach()
 

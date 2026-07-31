@@ -97,6 +97,8 @@ const char *mcdf_micro_status_str(mcdf_micro_status status) {
       return "E_MANIFEST_MISSING_FILE";
     case MCDF_MICRO_E_MANIFEST_EXTRA_FILE: return "E_MANIFEST_EXTRA_FILE";
     case MCDF_MICRO_E_ALGO_NOT_ALLOWED:  return "E_ALGO_NOT_ALLOWED";
+    case MCDF_MICRO_E_CONTENT_SEALED:    return "E_CONTENT_SEALED";
+    case MCDF_MICRO_E_ABORTED:           return "E_ABORTED";
     case MCDF_MICRO_E_DISABLED:          return "E_DISABLED";
     case MCDF_MICRO_E_UNIMPLEMENTED:     return "E_UNIMPLEMENTED";
   }

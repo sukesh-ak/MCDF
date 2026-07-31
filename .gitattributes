@@ -17,3 +17,11 @@
 *.jpg   binary
 *.pdf   binary
 *.mcdf  binary
+
+# Vendored third-party sources are byte-preserved. The hashes recorded in
+# micro/render/md4c/README.md are the upstream release's own and are what prove
+# the copy is unmodified; normalizing line endings would silently break that
+# proof the first time an upstream release ships CRLF. These files are also the
+# one place in the repo where our conventions do not apply, because we do not
+# edit them.
+/micro/render/md4c/** -text

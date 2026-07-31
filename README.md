@@ -203,6 +203,14 @@ MCDF Studio, the optional GUI editor (`apps/studio`, `studio` feature), adds:
 - **GLFW** (zlib) — window and input
 - **stb_image** (MIT / public domain) — decode images for the live preview
 
+`mcdf_micro` has **no package manager to resolve anything**, so the one
+dependency it has is vendored instead:
+
+- **md4c** (MIT) — [`micro/render/md4c/`](micro/render/md4c/), an unmodified copy
+  of `release-0.5.3` with its licence and upstream hashes recorded alongside.
+  Two files, needed only when the render gate is on. It is the same parser the
+  C++ runtime takes from vcpkg; there is no vcpkg under ESP-IDF.
+
 ## Licensing
 
 Dual-licensed by content type — see [`LICENSING.md`](LICENSING.md):

@@ -93,6 +93,11 @@ typedef enum mcdf_micro_status {
   MCDF_MICRO_E_MANIFEST_MISSING_FILE,
   MCDF_MICRO_E_MANIFEST_EXTRA_FILE,
   MCDF_MICRO_E_ALGO_NOT_ALLOWED,
+  MCDF_MICRO_E_CONTENT_SEALED,
+
+  /* A render callback asked to stop. Not a defect in the document and not a
+     kit code - the caller already knows why it stopped. */
+  MCDF_MICRO_E_ABORTED,
 
   /* Honest-gap signals. E_DISABLED means a feature gate removed this code
      from the build; E_UNIMPLEMENTED means this build did not evaluate a

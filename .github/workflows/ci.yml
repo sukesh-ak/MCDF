@@ -174,7 +174,7 @@ jobs:
         run: |
           cmake --build build --parallel --target \
             fuzz_unpack fuzz_parsers fuzz_markdown \
-            fuzz_micro_tar fuzz_micro_member
+            fuzz_micro_tar fuzz_micro_member fuzz_micro_render
 
       - name: Fuzz (30s per target, seeded)
         env:
@@ -195,6 +195,7 @@ jobs:
           for t in unpack parsers markdown; do fuzz_one "$t" "fuzz/corpus/$t"; done
           fuzz_one micro_tar fuzz/corpus/unpack
           fuzz_one micro_member fuzz/corpus/parsers
+          fuzz_one micro_render fuzz/corpus/markdown
 
   # The reproducible Linux build, exactly as a contributor would run it.
   docker:

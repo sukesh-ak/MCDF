@@ -9,3 +9,11 @@ This repository is dual-licensed by content type:
                                         (see spec/LICENSE)
 
 See LICENSING.md for the full mapping and SPDX conventions.
+
+This repository redistributes one third-party component, under its own license:
+
+  md4c - micro/render/md4c/
+  Copyright (c) 2016-2024 Martin Mitas
+  Licensed under the MIT License; see micro/render/md4c/LICENSE.md.
+  An unmodified copy of release-0.5.3, carried in-tree because mcdf_micro
+  targets toolchains with no package manager. Upstream: https://github.com/mity/md4c

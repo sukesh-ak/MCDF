@@ -10,11 +10,21 @@ royalty-free (RF) license.
 | Content | License | SPDX identifier | Full text |
 |---|---|---|---|
 | Specification text — `spec/` (the RFC and all spec documents) | Community Specification License 1.0 | `Community-Spec-1.0` | [`spec/LICENSE`](spec/LICENSE) |
+| Vendored third-party code — `micro/render/md4c/` | MIT | `MIT` | [`micro/render/md4c/LICENSE.md`](micro/render/md4c/LICENSE.md) |
 | Source code & tooling — everything else | Apache License 2.0 | `Apache-2.0` | [`LICENSE`](LICENSE) |
 
 > Private, unpublished working notes are **excluded from version control** (see
 > [`.gitignore`](.gitignore)). They are not licensed for distribution and are
 > not part of the specification.
+
+**Vendored code keeps its own licence and its own copyright.** `mcdf_micro` is
+published as an ESP-IDF component, where there is no package manager to resolve
+a dependency from, so its one dependency is carried in-tree instead. It is an
+unmodified copy, its licence travels with it, and
+[`micro/render/md4c/README.md`](micro/render/md4c/README.md) records the version
+and the upstream file hashes — which is also what proves it is unmodified. Every
+other third-party component is resolved by vcpkg at build time and is not
+redistributed here; see the dependency list in [`README.md`](README.md).
 
 ## Why this split
 

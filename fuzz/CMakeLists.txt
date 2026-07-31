@@ -44,10 +44,15 @@ endforeach()
 # build, and a C++ harness would stop checking it.
 #
 # Seeds come from the existing corpora - fuzz/corpus/unpack for the archive
-# walker, fuzz/corpus/parsers for the member scanners - rather than from copies,
-# so the two implementations are fuzzed from the same inputs.
+# walker, fuzz/corpus/parsers for the member scanners, fuzz/corpus/markdown for
+# the event stream - rather than from copies, so both implementations are
+# fuzzed from the same inputs.
+#
+# micro_render is its own target because it is the one part of the reader that
+# allocates (md4c manages a heap) and the one that holds a lookahead slice into
+# the document buffer.
 if(TARGET mcdf_micro)
-  foreach(name micro_tar micro_member)
+  foreach(name micro_tar micro_member micro_render)
     add_executable(fuzz_${name} fuzz_${name}.c)
     set_target_properties(fuzz_${name} PROPERTIES
       C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)

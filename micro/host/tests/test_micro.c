@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "mcdf_micro/mcdf_micro.h"
+#include "mcdf_micro/mcdf_micro_render.h"
 #include "mcdf_micro/mcdf_micro_verify.h"
 
 /* A published conformance vector, in the one serialization this reader has.
@@ -1390,6 +1391,291 @@ static void test_integrity(void) {
 #endif
 }
 
+/* ------------------------------------------------------- the event stream */
+
+/* Flattens the stream into one line so a whole document's structure can be
+ * asserted as a string. Structure is what this layer produces; checking it any
+ * other way means writing a renderer inside the test. */
+static char   g_events[4096];
+static size_t g_events_len;
+static int    g_abort_after; /* 0 = never abort */
+static int    g_event_count;
+
+static void ev_add(const char *s, size_t len) {
+  size_t i;
+  for (i = 0; i < len && g_events_len + 1 < sizeof g_events; ++i) {
+    g_events[g_events_len++] = s[i];
+  }
+  g_events[g_events_len] = '\0';
+}
+
+static void ev_str(const char *s) { ev_add(s, strlen(s)); }
+
+static int ev_stop(void) {
+  ++g_event_count;
+  return (g_abort_after != 0 && g_event_count >= g_abort_after) ? 1 : 0;
+}
+
+static int t_enter_block(void *ctx, mcdf_micro_block type, const void *d) {
+  static const char *const names[] = {"doc", "quote", "ul", "ol", "li",
+                                      "hr",  "h",     "code", "p"};
+  (void)ctx;
+  ev_str("[+");
+  ev_str(names[type]);
+  if (type == MCDF_MICRO_BLOCK_H && d != NULL) {
+    char buf[8];
+    sprintf(buf, ":%d", ((const mcdf_micro_heading_detail *)d)->level);
+    ev_str(buf);
+  }
+  ev_str("]");
+  return ev_stop();
+}
+
+static int t_leave_block(void *ctx, mcdf_micro_block type, const void *d) {
+  static const char *const names[] = {"doc", "quote", "ul", "ol", "li",
+                                      "hr",  "h",     "code", "p"};
+  (void)ctx;
+  ev_str("[-");
+  ev_str(names[type]);
+  if (type == MCDF_MICRO_BLOCK_H && d != NULL) {
+    const mcdf_micro_heading_detail *h = (const mcdf_micro_heading_detail *)d;
+    if (h->id.len > 0) {
+      ev_str("#");
+      ev_add(h->id.text, h->id.len);
+    }
+  }
+  ev_str("]");
+  return ev_stop();
+}
+
+static int t_enter_span(void *ctx, mcdf_micro_span type, const void *d) {
+  static const char *const names[] = {"em", "strong", "link", "image", "code"};
+  (void)ctx;
+  ev_str("[+");
+  ev_str(names[type]);
+  if ((type == MCDF_MICRO_SPAN_LINK || type == MCDF_MICRO_SPAN_IMAGE) &&
+      d != NULL) {
+    const mcdf_micro_link_detail *l = (const mcdf_micro_link_detail *)d;
+    ev_str(l->is_member ? " member=" : " extern=");
+    ev_add(l->href.text, l->href.len);
+  }
+  ev_str("]");
+  return ev_stop();
+}
+
+static int t_leave_span(void *ctx, mcdf_micro_span type, const void *d) {
+  static const char *const names[] = {"em", "strong", "link", "image", "code"};
+  (void)ctx; (void)d;
+  ev_str("[-");
+  ev_str(names[type]);
+  ev_str("]");
+  return ev_stop();
+}
+
+static int t_text(void *ctx, mcdf_micro_text_type type, const char *text,
+                  size_t len) {
+  (void)ctx;
+  if (type == MCDF_MICRO_TEXT_SOFTBR) {
+    ev_str("~");
+  } else if (type == MCDF_MICRO_TEXT_BR) {
+    ev_str("\\\\");
+  } else {
+    ev_add(text, len);
+  }
+  return ev_stop();
+}
+
+/* Renders the container's content.md and leaves the flattened stream in
+ * g_events. */
+static mcdf_micro_status ev_render(mcdf_micro_reader *r, void *buf,
+                                   size_t buf_len) {
+  mcdf_micro_render_callbacks cb;
+  cb.enter_block = t_enter_block;
+  cb.leave_block = t_leave_block;
+  cb.enter_span = t_enter_span;
+  cb.leave_span = t_leave_span;
+  cb.text = t_text;
+  g_events_len = 0;
+  g_events[0] = '\0';
+  g_event_count = 0;
+  return mcdf_micro_render(r, buf, buf_len, &cb, NULL);
+}
+
+static void test_render(void) {
+  mcdf_micro_source src;
+  struct mem_source mem;
+  mcdf_micro_reader *r = NULL;
+  static unsigned char doc[8192];
+  size_t need = 0;
+
+  section("render: the block/span event stream");
+
+  tar_reset();
+  tar_add("content.md", "# Title {#top}\n\nHello.\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+
+#if !defined(MCDF_MICRO_HAS_RENDER)
+  /* The gate is off. Both entry points still exist - which is what lets one
+   * piece of caller code compile against every configuration - and both
+   * refuse rather than pretending. md4c is not in this build at all. */
+  CHECK_ST(mcdf_micro_render_size(r, &need), MCDF_MICRO_E_DISABLED);
+  CHECK(need == 0);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_E_DISABLED);
+  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) == 0);
+  (void)ev_render;
+#else
+  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) != 0);
+
+  /* The buffer is the caller's, and its size is exactly content.md's. */
+  CHECK_ST(mcdf_micro_render_size(r, &need), MCDF_MICRO_OK);
+  CHECK(need == strlen("# Title {#top}\n\nHello.\n"));
+
+  /* A buffer that cannot hold the document is refused, never truncated. */
+  CHECK_ST(ev_render(r, doc, need - 1), MCDF_MICRO_E_RANGE);
+
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  /* The anchor is stripped from the heading's text and reported as an id -
+   * and only on leave, because it sits at the end of the heading and cannot
+   * be known before the text has been read (spec 10.4). */
+  CHECK(strcmp(g_events,
+               "[+doc][+h:1]Title[-h#top][+p]Hello.[-p][-doc]") == 0);
+
+  /* Inline structure, and a container asset told apart from an external URL:
+   * a layout engine can read the first with mcdf_micro_read_at and must not
+   * fetch the second (spec 4.1). */
+  tar_reset();
+  tar_add("content.md",
+          "Text with *em* and `code`.\n"
+          "\n"
+          "![Diagram](assets/d.png)\n"
+          "\n"
+          "[Away](https://example.org/x) and [Escape](../outside.png)\n");
+  tar_add("assets/d.png", "\x89PNG-not-really");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  CHECK(strcmp(g_events,
+               "[+doc]"
+               "[+p]Text with [+em]em[-em] and [+code]code[-code].[-p]"
+               "[+p][+image member=assets/d.png]Diagram[-image][-p]"
+               "[+p][+link extern=https://example.org/x]Away[-link]"
+               " and [+link extern=../outside.png]Escape[-link][-p]"
+               "[-doc]") == 0);
+
+  /* Raw HTML is text, not markup (spec 10.4) - the same reading the reference
+   * renderer takes, because two implementations have to agree on what the
+   * document *is* before they can agree on anything else. */
+  tar_reset();
+  tar_add("content.md", "<div>not a tag</div>\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  CHECK(strcmp(g_events, "[+doc][+p]<div>not a tag</div>[-p][-doc]") == 0);
+
+  /* Every heading is reported with its own anchor, nested ones included. That
+   * is the render rule, and it is deliberately not the binding rule: only a
+   * top-level heading binds a schema section (spec 4.2). Two questions, two
+   * answers, from the same document. */
+  tar_reset();
+  tar_add("content.md", "# Top {#top}\n\n> ## Quoted {#quoted}\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  CHECK(strcmp(g_events,
+               "[+doc][+h:1]Top[-h#top][+quote][+h:2]Quoted[-h#quoted]"
+               "[-quote][-doc]") == 0);
+  CHECK_ST(mcdf_micro_has_anchor(r, "top"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "quoted"), MCDF_MICRO_E_NOT_FOUND);
+
+  /* The anchor is split off the *last* text chunk, and one chunk of lookahead
+   * is all it takes: an anchor is plain text, so md4c never splits one across
+   * chunks however much markup precedes it. These are the shapes that would
+   * break if that were wrong. */
+  tar_reset();
+  tar_add("content.md",
+          "## *Em* {#a}\n"
+          "\n"
+          "### A *b* c {#b}\n"
+          "\n"
+          "#### C# {#c}\n"
+          "\n"
+          "##### Trailing hash is not an anchor #\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  CHECK(strcmp(g_events,
+               "[+doc]"
+               "[+h:2][+em]Em[-em][-h#a]"
+               "[+h:3]A [+em]b[-em] c[-h#b]"
+               "[+h:4]C#[-h#c]"
+               "[+h:5]Trailing hash is not an anchor[-h]"
+               "[-doc]") == 0);
+
+  /* A heading whose anchor is its whole text leaves no text behind. */
+  tar_reset();
+  tar_add("content.md", "## {#only}\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_OK);
+  CHECK(strcmp(g_events, "[+doc][+h:2][-h#only][-doc]") == 0);
+
+  /* A callback that stops is not a broken document: md_parse reports an abort
+   * and an allocation failure the same way, and telling them apart is the
+   * difference between "you asked me to stop" and "your file is bad". */
+  tar_reset();
+  tar_add("content.md", "# One {#a}\n\nTwo\n\nThree\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  g_abort_after = 3;
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_E_ABORTED);
+  g_abort_after = 0;
+
+  /* Ciphertext fed to a CommonMark parser yields confident nonsense rather
+   * than an error, so a sealed content.md is refused before the parse
+   * (spec 6). */
+  tar_reset();
+  tar_add("content.md", "not really ciphertext, but the policy says it is");
+  tar_add("encryption/policy.yaml", "encrypted_files:\n  - content.md\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_render_size(r, &need), MCDF_MICRO_E_CONTENT_SEALED);
+  CHECK_ST(ev_render(r, doc, sizeof doc), MCDF_MICRO_E_CONTENT_SEALED);
+
+  /* No content.md is not a render failure to blame on the renderer. */
+  tar_reset();
+  tar_add("metadata.yaml", "title: x\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_render_size(r, &need), MCDF_MICRO_E_NOT_FOUND);
+
+  /* A real archive the reference runtime produced, end to end. */
+  {
+    struct fixture f;
+    if (fixture_open(&f, VECTOR("canonical/render"))) {
+      CHECK_ST(mcdf_micro_render_size(f.r, &need), MCDF_MICRO_OK);
+      CHECK(need > 0 && need <= sizeof doc);
+      CHECK_ST(ev_render(f.r, doc, sizeof doc), MCDF_MICRO_OK);
+      /* Structure the reference's own canonical HTML also shows. */
+      CHECK(strstr(g_events, "[-h#top]") != NULL);
+      CHECK(strstr(g_events, "[-h#lists]") != NULL);
+      CHECK(strstr(g_events, "[+image member=assets/diagram.png]") != NULL);
+      CHECK(strstr(g_events, "<div>not a tag</div>") != NULL);
+      fixture_close(&f);
+    }
+  }
+#endif
+}
+
 static void test_reporting(void) {
   const uint32_t bits = mcdf_micro_features();
 
@@ -1404,7 +1690,11 @@ static void test_reporting(void) {
   CHECK((bits & MCDF_MICRO_FEATURE_INTEGRITY) == 0);
 #endif
   CHECK((bits & MCDF_MICRO_FEATURE_SIGNED) == 0);
+#if defined(MCDF_MICRO_HAS_RENDER)
+  CHECK((bits & MCDF_MICRO_FEATURE_RENDER) != 0);
+#else
   CHECK((bits & MCDF_MICRO_FEATURE_RENDER) == 0);
+#endif
 
   /* Kit codes keep the kit's spelling, so a harness can print them straight. */
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_OK), "OK") == 0);
@@ -1426,6 +1716,9 @@ static void test_reporting(void) {
                "E_MANIFEST_EXTRA_FILE") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_ALGO_NOT_ALLOWED),
                "E_ALGO_NOT_ALLOWED") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_CONTENT_SEALED),
+               "E_CONTENT_SEALED") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_ABORTED), "E_ABORTED") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_UNIMPLEMENTED),
                "E_UNIMPLEMENTED") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_DISABLED), "E_DISABLED") == 0);
@@ -1447,6 +1740,7 @@ int main(void) {
   test_validate_core();
   test_manifest_membership();
   test_integrity();
+  test_render();
   test_path_safety();
   test_reporting();
 
