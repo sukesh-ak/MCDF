@@ -12,20 +12,6 @@ Make working with documents easier for everyone. MCDF treats a document as a
 structured, versionable, signable, AI-native **container** — plain Markdown +
 YAML + JSON + assets — instead of a fixed-layout, print-first file.
 
-This repository holds the **specification** and the **primary C++ runtime**.
-
-- **Spec:** [`spec/`](spec/) — the format definition (RFC).
-- **Runtime:** the C++ library `libmcdf` (`src/`, `include/`) and clients (`apps/`).
-- **Conformance kit:** [`conformance/`](conformance/) — JSON Schemas, known-answer
-  test vectors, an error taxonomy, and a runner that scores *any* implementation.
-- **Open by design:** `.mcdf` is re-implementable in any language from the spec
-  and the conformance kit; the C++ runtime is the canonical one, not a gate.
-  Reading, writing and modifying a document needs **no cryptography** — a
-  container is just Markdown + YAML + JSON.
-
-Created and maintained by **[Sukesh Ashok Kumar](https://github.com/sukesh-ak)** —
-the format design, the specification, and the reference implementation.
-
 ## Why bother with another document format
 
 Most documents today are either a PDF — a picture of a page — or a `.docx`, a
@@ -108,6 +94,22 @@ If the appearance of the page is the point — a form that must look exactly so,
 filing with a mandated layout, anything typeset for print — use a PDF. MCDF is
 for documents whose *content* is the point and whose appearance should adapt to
 whatever is reading them.
+
+## What's in this repo
+
+The **specification** and the **primary C++ runtime**.
+
+- **Spec:** [`spec/`](spec/) — the format definition (RFC).
+- **Runtime:** the C++ library `libmcdf` (`src/`, `include/`) and clients (`apps/`).
+- **Conformance kit:** [`conformance/`](conformance/) — JSON Schemas, known-answer
+  test vectors, an error taxonomy, and a runner that scores *any* implementation.
+- **Open by design:** `.mcdf` is re-implementable in any language from the spec
+  and the conformance kit; the C++ runtime is the canonical one, not a gate.
+  Reading, writing and modifying a document needs **no cryptography** — a
+  container is just Markdown + YAML + JSON.
+
+Created and maintained by **[Sukesh Ashok Kumar](https://github.com/sukesh-ak)** —
+the format design, the specification, and the reference implementation.
 
 ## Sponsor
 
