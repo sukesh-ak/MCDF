@@ -129,6 +129,41 @@ jobs:
             build/apps/studio/mcdf-studio
           if-no-files-found: error
 
+  # mcdf_micro on a 32-bit ABI. Every other job runs it 64-bit, but the parts it
+  # is written for are 32-bit: size_t is four bytes there, so the uint64_t
+  # container offsets stop being free and the arena's structs get smaller. That
+  # difference is invisible to the rest of the matrix - it is how a suite ends
+  # up encoding a 64-bit assumption without anyone choosing to.
+  #
+  # -m32 rather than an emulator on purpose: the same C, a few seconds, no
+  # dependencies. What it cannot cover is target codegen and alignment, which is
+  # what the toolchain build is for.
+  micro-32bit:
+    name: micro (32-bit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install 32-bit toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
+
+      # micro/ builds standalone with no dependencies at all, so this needs no
+      # vcpkg and no cache.
+      - name: Configure (-m32, all gate configurations)
+        run: |
+          cmake -B build32 -S micro -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-m32 -fsanitize=undefined -fno-sanitize-recover=undefined" \
+            -DCMAKE_CXX_FLAGS="-m32 -fsanitize=undefined -fno-sanitize-recover=undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="-m32 -fsanitize=undefined"
+
+      - name: Build
+        run: cmake --build build32 --parallel
+
+      - name: Test
+        run: ctest --test-dir build32 --output-on-failure
+
   # Coverage-guided fuzzing smoke: libFuzzer + ASan over the untrusted-input
   # surfaces (TAR unpack, YAML/JSON member parsers, markdown, the C reader).
   # Short seeded runs to catch regressions; longer campaigns are manual.

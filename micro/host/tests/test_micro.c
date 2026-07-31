@@ -101,7 +101,17 @@ static void tar_reset(void) {
 }
 
 static unsigned char *tar_block(void) {
-  unsigned char *b = g_tar + g_tar_len;
+  unsigned char *b;
+  /* A test that overruns this buffer corrupts whatever follows it and then
+   * fails somewhere else entirely - which is exactly what happened once. Say
+   * so here instead. */
+  if (g_tar_len + 512u > sizeof g_tar) {
+    printf("  FAIL  synthetic archive exceeds %lu bytes - raise g_tar or use "
+           "fewer members\n",
+           (unsigned long)sizeof g_tar);
+    exit(1);
+  }
+  b = g_tar + g_tar_len;
   g_tar_len += 512;
   return b;
 }
@@ -547,11 +557,38 @@ static void test_arena(void) {
   tar_end();
   tar_source(&src, &mem);
 
-  /* Room for one member, three in the archive: a clean refusal, and never a
-   * partially built index handed back. */
+  /* Room for one member, far more in the archive: a clean refusal, and never a
+   * partially built index handed back.
+   *
+   * The archive is deliberately much larger than the arena rather than one
+   * member larger. MCDF_MICRO_ARENA_SIZE is an *upper* bound - the structs it
+   * budgets for are smaller on a 32-bit ABI, where a pointer is four bytes -
+   * so "one member's arena, three members" is not a refusal everywhere. It
+   * refused on every 64-bit host and fit on the 32-bit targets this library
+   * actually ships to, which is the assumption a 64-bit-only test matrix
+   * cannot see it is making. */
+  {
+    int n;
+    tar_reset();
+    for (n = 0; n < 24; ++n) {
+      char name[32];
+      sprintf(name, "assets/file-%02d.bin", n);
+      tar_add(name, "x");
+    }
+    tar_end();
+    tar_source(&src, &mem);
+  }
   r = NULL;
   CHECK_ST(mcdf_micro_open(&src, small, sizeof small, &r), MCDF_MICRO_E_ARENA);
   CHECK(r == NULL);
+
+  /* Back to the small archive for the checks below. */
+  tar_reset();
+  tar_add("content.md", "a");
+  tar_add("metadata.yaml", "title: T\n");
+  tar_add("schema.yaml", "sections: []\n");
+  tar_end();
+  tar_source(&src, &mem);
 
   /* Too small even for the reader's own header. */
   CHECK_ST(mcdf_micro_open(&src, tiny, sizeof tiny, &r), MCDF_MICRO_E_ARENA);
