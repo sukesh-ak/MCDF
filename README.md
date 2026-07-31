@@ -37,8 +37,55 @@ re-sign and watch it heal.
 
 Hardening is continuous: unit + determinism tests on three OSes, known-answer
 conformance vectors, and coverage-guided fuzzing (libFuzzer + ASan) over
-every surface that parses untrusted input. Remaining: RSA-PSS, DOCX/PDF
-export, OCI distribution.
+every surface that parses untrusted input.
+
+### Feature status
+
+**Format**
+
+- [x] Specification (RFC) and conformance kit — schemas, known-answer vectors,
+      error taxonomy, a runner that scores any implementation
+- [x] Container serialization — TAR (required) and directory (optional)
+- [x] All five profiles — Core, Integrity, Signed, Encrypted, Render
+
+**C++ runtime and CLI**
+
+- [x] `inspect` · `validate` · `verify` · `pack` / `unpack` · `audit`
+- [x] `sign` — Ed25519 and ECDSA P-256 via `did:key`
+- [x] `encrypt` / `decrypt` — AES-256-GCM + HPKE
+- [x] `render` — canonical HTML and plain text with a provenance stamp
+- [x] Import — Markdown, EPUB and HTML (library API, exposed in Studio)
+- [ ] RSA-PSS signatures
+- [ ] DOCX / PDF export
+- [ ] PDF import — a separate tool consuming `libmcdf`
+
+**Clients**
+
+- [x] `mcdf` CLI — Windows, Linux, macOS
+- [x] MCDF Studio — the Dear ImGui desktop editor
+- [x] MCDF Web — accessible browser client, installable PWA
+
+**Independent implementations**
+
+- [x] `mcdf-ts` (TypeScript) — every published vector, all five profiles
+- [x] `mcdf_micro` (C99) — Core, Integrity, and the Render event stream
+- [x] `mcdf_micro` as an ESP-IDF component — esp32s3 (Xtensa) and esp32p4
+      (RISC-V), every feature-gate configuration, warnings as errors
+- [ ] `mcdf_micro` Signed — signature verification through a platform-supplied
+      primitive, so the library keeps zero crypto dependencies. Low priority: a
+      constrained reader that reports Core and Integrity honestly is already
+      useful, and says `E_UNIMPLEMENTED` for the rest rather than claiming it.
+
+**Engineering**
+
+- [x] Unit, determinism and conformance tests on three operating systems
+- [x] Coverage-guided fuzzing over every untrusted-input surface
+- [x] A 32-bit ABI build, because every part `mcdf_micro` targets is 32-bit
+- [x] Reproducible Docker build; vcpkg overlay port
+
+**Not planned.** OCI as a container backend: the spec has exactly two container
+forms, and a registry *transports* the interchange file as a blob — that is
+tooling, not a backend, and needs only a registered media type.
 
 ## Try it
 

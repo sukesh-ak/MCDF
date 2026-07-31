@@ -302,4 +302,11 @@ quickest way to see what a document actually contains.
 
 Core, Integrity and the Render event stream are complete, host-buildable and
 scored by the conformance kit, and the ESP-IDF port builds for both of the parts
-it targets. Still to come: signature verification as an injected primitive.
+it targets.
+
+The Signed profile is a **todo without a date**. It would arrive as format work
+here plus a verification primitive the platform supplies through a callback, the
+same shape as the read callback — the library would still hold no crypto
+dependency. It is not urgent: a reader that reports Core and Integrity, and says
+`E_UNIMPLEMENTED` for what it has not evaluated, is honest and useful as it
+stands, and a device that needs a trust badge today can verify upstream.
