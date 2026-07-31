@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+PackageIdentifier: Sukeshak.MCDF
+PackageVersion: 0.8.5
+PackageLocale: en-US
+Publisher: Sukesh Ashok Kumar
+PublisherUrl: https://github.com/sukesh-ak
+PublisherSupportUrl: https://github.com/sukesh-ak/MCDF/issues
+Author: Sukesh Ashok Kumar
+PackageName: MCDF
+PackageUrl: https://github.com/sukesh-ak/MCDF
+# The code is Apache-2.0. The specification under spec/ is CSL-1.0, which is
+# what LICENSING.md sets out; the CLI ships both files alongside the binary.
+License: Apache-2.0
+LicenseUrl: https://github.com/sukesh-ak/MCDF/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+CopyrightUrl: https://github.com/sukesh-ak/MCDF/blob/main/LICENSING.md
+ShortDescription: Command-line tool for MCDF documents - Markdown containers you can validate, hash, sign, encrypt and render.
+Description: |-
+  MCDF treats a document as a container of plain Markdown, YAML, JSON and
+  assets rather than a fixed-layout file, so it diffs in Git, machines can read
+  its structure instead of guessing at it, and you can prove what it is and who
+  wrote it.
+
+  The mcdf command inspects and validates containers against all five
+  conformance profiles, builds and verifies the integrity manifest, signs and
+  verifies with Ed25519 or ECDSA P-256 via did:key, encrypts and decrypts with
+  AES-256-GCM and HPKE, appends to and checks the hash-chained audit log,
+  imports Markdown, EPUB and HTML, and renders to sanitized HTML or plain text.
+
+  A single self-contained executable with no runtime dependencies.
+Moniker: mcdf
+Tags:
+  - cli
+  - document
+  - documents
+  - encryption
+  - markdown
+  - publishing
+  - signing
+  - yaml
+ReleaseNotesUrl: https://github.com/sukesh-ak/MCDF/releases/tag/v0.8.5
+Documentations:
+  - DocumentLabel: Specification
+    DocumentUrl: https://github.com/sukesh-ak/MCDF/tree/main/spec
+  - DocumentLabel: Implementer's Guide
+    DocumentUrl: https://github.com/sukesh-ak/MCDF/blob/main/conformance/GUIDE.md
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
+#
+# The release zip is installed as a portable command: winget unpacks it and puts
+# a shim named `mcdf` in its Links directory, which is already on PATH, so the
+# command works in a new shell and `winget uninstall` removes it cleanly. No
+# setup program, no registry entries, nothing to leave behind.
+#
+# RelativeFilePath must match the layout inside the archive exactly.
+PackageIdentifier: Sukeshak.MCDF
+PackageVersion: 0.8.5
+MinimumOSVersion: 10.0.17763.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: mcdf-windows-x64\mcdf.exe
+    PortableCommandAlias: mcdf
+UpgradeBehavior: install
+ReleaseDate: 2026-07-31
+Commands:
+  - mcdf
+Installers:
+  # Built with the x64-windows-static triplet and a statically linked MSVC
+  # runtime, so the executable needs no loose DLLs and no redistributable.
+  - Architecture: x64
+    InstallerUrl: https://github.com/sukesh-ak/MCDF/releases/download/v0.8.5/mcdf-windows-x64.zip
+    InstallerSha256: 6A4212C495E12E2FC0C7FDC5C8CADEF99ED2ACFD3BA0F17DDADDA7CC58390A27
+ManifestType: installer
+ManifestVersion: 1.6.0
