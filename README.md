@@ -27,8 +27,15 @@ a history that can't be quietly rewritten.
 
 ### Your documents live in Git properly
 
-A `.mcdf` unpacks to a folder of ordinary files, so version control does what it
-already does well:
+You commit the document as a **folder**, which is exactly what the directory form
+exists for, and keep the single `.mcdf` file for sending it somewhere:
+
+```sh
+mcdf unpack contract.mcdf -o contract/   # to work on it
+mcdf pack   contract/ -o contract.mcdf   # to hand it over
+```
+
+Then version control does what it already does well:
 
 ```diff
  ## Terms and Conditions {#terms}
@@ -37,12 +44,15 @@ already does well:
 +Payment is due within 14 days of invoice.
 ```
 
-That's a review comment waiting to happen. The same edit to a PDF gives you
-`Binary files a/contract.pdf and b/contract.pdf differ`, and a `.docx` is a zip,
-so you get the same non-answer unless you bolt a converter onto Git first.
-Branch a document, review it in a pull request, merge two people's edits,
-`git blame` a paragraph to find out when that clause appeared — none of it needs
-new tooling, because it is text in a folder.
+That's a review comment waiting to happen. Branch a document, review it in a pull
+request, merge two people's edits, `git blame` a paragraph to find out when that
+clause appeared — none of it needs new tooling, because it is text in a folder.
+
+To be straight about it: commit the packed `.mcdf` instead and Git tells you
+`Binary files a/contract.mcdf and b/contract.mcdf differ`, exactly as it does for
+a PDF — a tar is a binary blob like any other. The difference is that MCDF *has*
+a form Git can read, and it is the same document either way. Packing is
+byte-deterministic, so the file you ship rebuilds identically from the commit.
 
 ### Machines get structure instead of guesswork
 
@@ -156,7 +166,8 @@ every surface that parses untrusted input.
 - [x] `sign` — Ed25519 and ECDSA P-256 via `did:key`
 - [x] `encrypt` / `decrypt` — AES-256-GCM + HPKE
 - [x] `render` — canonical HTML and plain text with a provenance stamp
-- [x] Import — bring in Markdown, EPUB or HTML (from Studio, or the library)
+- [x] Import — `create --from` a Markdown file, `import-epub`, `import-html`
+      (in Studio too, and in the library)
 - [ ] RSA-PSS signatures
 - [ ] DOCX / PDF export
 - [ ] PDF import — a separate tool consuming `libmcdf`
