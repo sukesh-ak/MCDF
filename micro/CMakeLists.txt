@@ -11,45 +11,112 @@
 # The host matrix is where the real testing happens. An IDF build can only
 # prove that it compiles.
 
-set(MCDF_MICRO_SOURCES
+# The files that decide whether a document is valid. They are listed separately
+# from the rest because of the guard below: what they must never do is depend on
+# a feature gate, and gated sources get appended to MCDF_MICRO_SOURCES.
+set(MCDF_MICRO_UNGATED_SOURCES
   src/ustar.c
   src/index.c
   src/manifest.c
-  src/yaml_min.c)
+  src/yaml_min.c
+  src/schema.c
+  src/anchors.c
+  src/validate.c)
+
+set(MCDF_MICRO_SOURCES
+  ${MCDF_MICRO_UNGATED_SOURCES}
+  src/sha256.c
+  src/verify.c)
+
+# ---- structural guard: format decisions must not depend on a gate ------------
+#
+# A Core-only build and an all-on build must consider exactly the same
+# documents valid. The one concrete way to break that is to resolve heading
+# anchors through md4c once the render gate brings md4c into the tree - which
+# will look like an obvious simplification, because md4c is a real CommonMark
+# parser and anchors.c is a line scanner. It would also make
+# MCDF_MICRO_ENABLE_RENDER change which documents pass validation, and a comment
+# saying "don't" has never stopped anyone.
+#
+# So the rule is checked rather than written down: no file that participates in
+# a validity decision may include md4c. Mentioning it in a comment is fine and
+# in fact encouraged - it is the include that couples them.
+foreach(mcdf_micro_guarded
+        ${MCDF_MICRO_UNGATED_SOURCES}
+        src/internal.h
+        include/mcdf_micro/mcdf_micro.h)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${mcdf_micro_guarded}" mcdf_micro_text)
+  if(mcdf_micro_text MATCHES "#[ \t]*include[ \t]*[<\"]md4c")
+    message(FATAL_ERROR
+      "mcdf_micro: ${mcdf_micro_guarded} includes md4c.\n"
+      "These files decide whether a document is valid, and that decision must "
+      "be identical in every feature-gate configuration (see the anchor scanner "
+      "in src/anchors.c). Routing it through a parser that only exists when "
+      "MCDF_MICRO_ENABLE_RENDER is on would make a build's gates change what "
+      "'valid' means. Keep md4c inside the render translation unit.")
+  endif()
+endforeach()
+
+# ---- feature gates -----------------------------------------------------------
+# Gates are named after the spec's profile ladder, so a build's configuration
+# and the conformance vocabulary are the same vocabulary. Each removes code
+# rather than merely skipping calls, the disabled entry points survive as stubs
+# returning MCDF_MICRO_E_DISABLED so one piece of caller code compiles against
+# every configuration, and no gate ever changes which documents the reader
+# considers valid.
+#
+# The definition is PUBLIC: a consumer's translation unit has to agree with the
+# library about what was compiled, or MCDF_MICRO_HAS_INTEGRITY promises a
+# capability that is not linked in.
+#
+# Only the gates whose code exists are declared. SIGNED and RENDER arrive with
+# their implementations; an option that toggled nothing would be a lie the
+# build system tells.
+option(MCDF_MICRO_ENABLE_INTEGRITY
+       "SHA-256 hashing and manifest.json verification (Integrity profile)" ON)
 
 if(ESP_PLATFORM)
   idf_component_register(
     SRCS ${MCDF_MICRO_SOURCES}
     INCLUDE_DIRS include)
+  if(MCDF_MICRO_ENABLE_INTEGRITY)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC MCDF_MICRO_ENABLE_INTEGRITY)
+  endif()
   return()
 endif()
 
 cmake_minimum_required(VERSION 3.21)
 
 if(NOT DEFINED PROJECT_NAME)
-  project(mcdf_micro VERSION 0.1.0 LANGUAGES C CXX)
+  project(mcdf_micro VERSION 0.2.0 LANGUAGES C CXX)
   set(MCDF_MICRO_STANDALONE TRUE)
 endif()
 
-add_library(mcdf_micro STATIC ${MCDF_MICRO_SOURCES})
+# One library, one configuration. Called once for the target consumers link,
+# and once per extra gate configuration the matrix keeps alive.
+function(mcdf_micro_add_library target integrity)
+  add_library(${target} STATIC ${MCDF_MICRO_SOURCES})
+  target_include_directories(${target}
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  set_target_properties(${target} PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF)
+  if(integrity)
+    target_compile_definitions(${target} PUBLIC MCDF_MICRO_ENABLE_INTEGRITY)
+  endif()
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic
+                                             -Wconversion -Wshadow)
+  endif()
+endfunction()
+
+mcdf_micro_add_library(mcdf_micro ${MCDF_MICRO_ENABLE_INTEGRITY})
 add_library(mcdf::micro ALIAS mcdf_micro)
-
-target_include_directories(mcdf_micro
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         $<INSTALL_INTERFACE:include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-set_target_properties(mcdf_micro PROPERTIES
-  C_STANDARD 99
-  C_STANDARD_REQUIRED ON
-  C_EXTENSIONS OFF)
-
-if(MSVC)
-  target_compile_options(mcdf_micro PRIVATE /W4)
-else()
-  target_compile_options(mcdf_micro PRIVATE -Wall -Wextra -Wpedantic
-                                            -Wconversion -Wshadow)
-endif()
 
 # Tests follow the parent build's switch when there is one. Both need the
 # repo's conformance vectors and .mcdf fixtures, so they are skipped when this
@@ -64,36 +131,116 @@ option(MCDF_MICRO_BUILD_TESTS "Build the mcdf_micro host tests"
 
 get_filename_component(MCDF_MICRO_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
+# Everything a configuration is worth testing with: the C99 suite, the C++23
+# header gate, and the CLI the conformance kit scores. Built per configuration,
+# because the classic failure mode of a feature-gated library is the smallest
+# build quietly ceasing to compile while nobody looks.
+function(mcdf_micro_add_harness lib suffix)
+  add_executable(mcdf-micro-tests${suffix} host/tests/test_micro.c)
+  target_link_libraries(mcdf-micro-tests${suffix} PRIVATE ${lib})
+  set_target_properties(mcdf-micro-tests${suffix} PROPERTIES
+    C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  target_compile_definitions(mcdf-micro-tests${suffix} PRIVATE
+    MCDF_MICRO_FIXTURE_MINIMAL="${MCDF_MICRO_REPO_ROOT}/fuzz/corpus/unpack/minimal.mcdf"
+    MCDF_MICRO_FIXTURE_SHOWCASE="${MCDF_MICRO_REPO_ROOT}/examples/showcase.mcdf"
+    MCDF_MICRO_VECTORS="${MCDF_MICRO_REPO_ROOT}/conformance/vectors")
+  add_test(NAME mcdf-micro-tests${suffix} COMMAND mcdf-micro-tests${suffix})
+
+  # The C++ gate. Writing the library in C is only worth something if C++
+  # callers can include it, and the guards rot the first time someone adds a
+  # designated initialiser to an inline helper - so a TU that includes every
+  # public header is compiled at the repo's C++23 with warnings as errors.
+  add_executable(mcdf-micro-cxx-gate${suffix} host/tests/cxx_header_gate.cpp)
+  target_link_libraries(mcdf-micro-cxx-gate${suffix} PRIVATE ${lib})
+  set_target_properties(mcdf-micro-cxx-gate${suffix} PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(mcdf-micro-cxx-gate${suffix} PRIVATE /W4 /WX)
+  else()
+    target_compile_options(mcdf-micro-cxx-gate${suffix} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+  endif()
+  add_test(NAME mcdf-micro-cxx-gate${suffix} COMMAND mcdf-micro-cxx-gate${suffix})
+
+  # The harness run.sh scores. host/ never ships to a device, which is what
+  # lets the canonical-manifest emitter live there without the target paying
+  # for it - see host/jcs.h.
+  add_executable(mcdf-micro-cli${suffix} host/mcdf_micro_cli.c host/jcs.c)
+  target_link_libraries(mcdf-micro-cli${suffix} PRIVATE ${lib})
+  target_include_directories(mcdf-micro-cli${suffix} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/host)
+  set_target_properties(mcdf-micro-cli${suffix} PROPERTIES
+    C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(mcdf-micro-cli${suffix} PRIVATE /W4)
+  else()
+    target_compile_options(mcdf-micro-cli${suffix} PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+endfunction()
+
 if(MCDF_MICRO_BUILD_TESTS AND
    EXISTS "${MCDF_MICRO_REPO_ROOT}/examples/showcase.mcdf")
   if(MCDF_MICRO_STANDALONE)
     enable_testing()
   endif()
 
-  # The C99 suite: the library exercised exactly as firmware would use it,
-  # over real archives the reference runtime produced.
-  add_executable(mcdf-micro-tests host/tests/test_micro.c)
-  target_link_libraries(mcdf-micro-tests PRIVATE mcdf_micro)
-  set_target_properties(mcdf-micro-tests PROPERTIES
-    C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-  target_compile_definitions(mcdf-micro-tests PRIVATE
-    MCDF_MICRO_FIXTURE_MINIMAL="${MCDF_MICRO_REPO_ROOT}/fuzz/corpus/unpack/minimal.mcdf"
-    MCDF_MICRO_FIXTURE_SHOWCASE="${MCDF_MICRO_REPO_ROOT}/examples/showcase.mcdf")
-  add_test(NAME mcdf-micro-tests COMMAND mcdf-micro-tests)
+  mcdf_micro_add_harness(mcdf_micro "")
 
-  # The C++ gate. Writing the library in C is only worth something if C++
-  # callers can include it, and the guards rot the first time someone adds a
-  # designated initialiser to an inline helper - so a TU that includes every
-  # public header is compiled at the repo's C++23 with warnings as errors.
-  add_executable(mcdf-micro-cxx-gate host/tests/cxx_header_gate.cpp)
-  target_link_libraries(mcdf-micro-cxx-gate PRIVATE mcdf_micro)
-  set_target_properties(mcdf-micro-cxx-gate PROPERTIES
-    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-  if(MSVC)
-    target_compile_options(mcdf-micro-cxx-gate PRIVATE /W4 /WX)
+  # The gate matrix. Four builds of a tiny C library with no dependencies is
+  # close to free, and it is the only way to catch code someone parked inside a
+  # gate that turns out to be needed outside it. The configuration the options
+  # already produced is not built twice.
+  #
+  # Two configurations exist because two gates do. When the render gate lands,
+  # `core-render` and `all-on` go in the foreach below and gain a
+  # `config_render` sibling to `config_integrity` - and that is what makes the
+  # anchor assertions in host/tests/test_micro.c run against a build that has
+  # md4c in it. Until then nothing compiles the render-on configuration, so
+  # nothing can catch it disagreeing about which documents are valid. This is
+  # the step, not an optimisation to skip.
+  if(MCDF_MICRO_ENABLE_INTEGRITY)
+    set(MCDF_MICRO_PRIMARY_CONFIG core-integrity)
   else()
-    target_compile_options(mcdf-micro-cxx-gate PRIVATE
-      -Wall -Wextra -Wpedantic -Werror)
+    set(MCDF_MICRO_PRIMARY_CONFIG core)
   endif()
-  add_test(NAME mcdf-micro-cxx-gate COMMAND mcdf-micro-cxx-gate)
+
+  foreach(config core core-integrity)
+    if("${config}" STREQUAL "${MCDF_MICRO_PRIMARY_CONFIG}")
+      continue()
+    endif()
+    if("${config}" STREQUAL "core-integrity")
+      set(config_integrity ON)
+    else()
+      set(config_integrity OFF)
+    endif()
+    mcdf_micro_add_library(mcdf_micro_${config} ${config_integrity})
+    mcdf_micro_add_harness(mcdf_micro_${config} "-${config}")
+  endforeach()
+
+  # Score the CLI against the published conformance vectors, exactly as any
+  # independent implementation is scored. Only the TAR form: this reader has no
+  # filesystem and never will, which spec 3 makes a conforming position by
+  # naming TAR the one REQUIRED serialization.
+  #
+  # The runner reports the profiles this build does not evaluate as "not
+  # implemented" rather than as passes or failures - see conformance/errors.md.
+  if(EXISTS "${MCDF_MICRO_REPO_ROOT}/conformance/run.sh")
+    if(WIN32)
+      find_program(MCDF_MICRO_PWSH NAMES pwsh powershell)
+      if(MCDF_MICRO_PWSH)
+        add_test(NAME mcdf-micro-conformance
+          COMMAND ${MCDF_MICRO_PWSH} -NoProfile -ExecutionPolicy Bypass
+                  -File ${MCDF_MICRO_REPO_ROOT}/conformance/run.ps1
+                  $<TARGET_FILE:mcdf-micro-cli> tar)
+      endif()
+    else()
+      find_program(MCDF_MICRO_SH sh)
+      if(MCDF_MICRO_SH)
+        add_test(NAME mcdf-micro-conformance
+          COMMAND ${MCDF_MICRO_SH} ${MCDF_MICRO_REPO_ROOT}/conformance/run.sh
+                  $<TARGET_FILE:mcdf-micro-cli> tar)
+      endif()
+    endif()
+  endif()
 endif()

@@ -21,6 +21,12 @@
 # filesystem can be scored on nothing else. Pass `dir` to score the OPTIONAL
 # directory form instead, which only implementations that support it will pass.
 #
+# An implementation may stop partway up the profile ladder. One that says so -
+# by failing with E_UNIMPLEMENTED, which errors.md reserves for exactly this -
+# is scored "not implemented" for that vector rather than passed or failed, and
+# the count is printed. Anything else it reports is scored normally, so
+# declining a profile buys nothing but honesty about which profiles it claims.
+#
 # Why this exists: run.sh is POSIX sh, so ctest skipped the kit on Windows
 # entirely. That gap let a real defect hide - the CLI's stdout was in text mode,
 # so `mcdf manifest` emitted CRLF and was not byte-exact on Windows, and no job
@@ -43,6 +49,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:passed = 0
 $script:failed = 0
+$script:skipped = 0
 
 # The container path for a vector, in the selected serialization.
 function Get-Container([string]$vectorDir) {
@@ -105,6 +112,19 @@ function Add-Result([string]$name, [bool]$ok, [string]$detail) {
   }
 }
 
+function Add-Skipped([string]$name, [string]$detail) {
+  $suffix = ''
+  if ($detail) { $suffix = " - $detail" }
+  Write-Host ("  N/A   {0}{1}" -f $name, $suffix)
+  $script:skipped++
+}
+
+# True when the run declined the profile rather than judging the document.
+function Test-Declined($result) {
+  if ($result.Code -eq 0) { return $false }
+  return (($result.StdOut + $result.StdErr) -like '*E_UNIMPLEMENTED*')
+}
+
 $cliPath = Resolve-Cli $Cli
 if (-not $cliPath) {
   [Console]::Error.WriteLine("error: CLI not found: $Cli")
@@ -146,6 +166,10 @@ foreach ($dir in $caseDirs) {
     continue
   }
   $result = Invoke-Cli $cliPath @('validate', $container, '--profile', $profileName)
+  if (Test-Declined $result) {
+    Add-Skipped $dir.Name "$profileName not implemented"
+    continue
+  }
   $combined = $result.StdOut + $result.StdErr
 
   if ($expect -eq 'pass') {
@@ -194,7 +218,9 @@ if (Test-Path -LiteralPath $canonicalRoot) {
     if ($check -eq 'canonical-manifest') {
       $expectedPath = Join-Path $dir.FullName (Join-Path 'expected' 'manifest.json')
       $result = Invoke-Cli $cliPath @('manifest', $container)
-      if (Test-SameBytes $result.Bytes $expectedPath) {
+      if (Test-Declined $result) {
+        Add-Skipped $dir.Name 'canonical manifest not implemented'
+      } elseif (Test-SameBytes $result.Bytes $expectedPath) {
         Add-Result $dir.Name $true ''
       } else {
         Add-Result $dir.Name $false 'output differs from expected/manifest.json'
@@ -206,7 +232,9 @@ if (Test-Path -LiteralPath $canonicalRoot) {
         if ($fmt -eq 'html') { $file = 'render.html' } else { $file = 'render.txt' }
         $expectedPath = Join-Path $dir.FullName (Join-Path 'expected' $file)
         $result = Invoke-Cli $cliPath @('render', $fmt, $container)
-        if (Test-SameBytes $result.Bytes $expectedPath) {
+        if (Test-Declined $result) {
+          Add-Skipped ("{0} ({1})" -f $dir.Name, $fmt) 'canonical render not implemented'
+        } elseif (Test-SameBytes $result.Bytes $expectedPath) {
           Add-Result ("{0} ({1})" -f $dir.Name, $fmt) $true ''
         } else {
           Add-Result ("{0} ({1})" -f $dir.Name, $fmt) $false "output differs from $file"
@@ -220,6 +248,14 @@ if (Test-Path -LiteralPath $canonicalRoot) {
 
 Write-Host ''
 Write-Host '-------------------------------------'
-Write-Host ("passed {0}, failed {1}" -f $script:passed, $script:failed)
+if ($script:skipped -eq 0) {
+  Write-Host ("passed {0}, failed {1}" -f $script:passed, $script:failed)
+} else {
+  # Printed, never hidden: a score of "0 failed" means something different when
+  # a third of the vectors were never evaluated, and the reader of this line is
+  # entitled to know which.
+  Write-Host ("passed {0}, failed {1}, not implemented {2}" -f
+              $script:passed, $script:failed, $script:skipped)
+}
 if ($script:failed -ne 0) { exit 1 }
 exit 0

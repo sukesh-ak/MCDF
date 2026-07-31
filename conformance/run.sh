@@ -21,6 +21,12 @@
 # filesystem can be scored on nothing else. Pass `dir` to score the OPTIONAL
 # directory form instead, which only implementations that support it will pass.
 #
+# An implementation may stop partway up the profile ladder. One that says so -
+# by failing with E_UNIMPLEMENTED, which errors.md reserves for exactly this -
+# is scored "not implemented" for that vector rather than passed or failed, and
+# the count is printed. Anything else it reports is scored normally, so
+# declining a profile buys nothing but honesty about which profiles it claims.
+#
 # Dependency-free POSIX sh: no jq, no python.
 
 CLI="${1:-mcdf}"
@@ -28,11 +34,31 @@ FORM="${2:-tar}"
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PASS=0
 FAIL=0
+SKIP=0
 
 case "$FORM" in
   tar|dir) ;;
   *) echo "error: form must be 'tar' or 'dir', got '$FORM'" >&2; exit 2 ;;
 esac
+
+# Byte-exact checks cannot go through `$(...)`, which strips trailing newlines,
+# so the CLI's streams land in files.
+WORK="${TMPDIR:-/tmp}/mcdf-conformance-$$"
+mkdir -p "$WORK" || { echo "error: cannot create $WORK" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+OUT="$WORK/out"
+ERR="$WORK/err"
+
+# Runs the CLI, capturing stdout and stderr separately. Sets RC.
+run_cli() {
+  "$@" >"$OUT" 2>"$ERR"
+  RC=$?
+}
+
+# True when the run declined the profile rather than judging the document.
+declined() {
+  [ "$RC" -ne 0 ] && grep -q 'E_UNIMPLEMENTED' "$OUT" "$ERR" 2>/dev/null
+}
 
 # The container path for a vector, in the selected serialization.
 container_for() {
@@ -55,6 +81,11 @@ record() { # name, ok(0/1), detail
     printf '  FAIL  %s%s\n' "$1" "${3:+ - $3}"
     FAIL=$((FAIL + 1))
   fi
+}
+
+skip() { # name, detail
+  printf '  N/A   %s%s\n' "$1" "${2:+ - $2}"
+  SKIP=$((SKIP + 1))
 }
 
 if ! command -v "$CLI" >/dev/null 2>&1 && [ ! -x "$CLI" ]; then
@@ -86,13 +117,17 @@ for d in "$HERE"/vectors/valid/*/ "$HERE"/vectors/invalid/*/; do
     continue
   fi
 
-  out=$("$CLI" validate "$c" --profile "$profile" 2>&1)
-  rc=$?
+  run_cli "$CLI" validate "$c" --profile "$profile"
+  if declined; then
+    skip "$name" "$profile not implemented"
+    continue
+  fi
+  out=$(cat "$OUT" "$ERR")
 
   if [ "$expect" = "pass" ]; then
-    if [ $rc -eq 0 ]; then record "$name" 0; else record "$name" 1 "expected pass, got: $out"; fi
+    if [ "$RC" -eq 0 ]; then record "$name" 0; else record "$name" 1 "expected pass, got: $out"; fi
   else
-    if [ $rc -eq 0 ]; then
+    if [ "$RC" -eq 0 ]; then
       record "$name" 1 "expected rejection ($want_err)"
     elif [ -n "$want_err" ] && ! printf '%s' "$out" | grep -q "$want_err"; then
       record "$name" 1 "rejected, but not with $want_err"
@@ -118,8 +153,10 @@ for d in "$HERE"/vectors/canonical/*/; do
 
   case "$check" in
     canonical-manifest)
-      if "$CLI" manifest "$c" 2>/dev/null |
-        diff -q - "$d/expected/manifest.json" >/dev/null 2>&1; then
+      run_cli "$CLI" manifest "$c"
+      if declined; then
+        skip "$name" "canonical manifest not implemented"
+      elif diff -q "$OUT" "$d/expected/manifest.json" >/dev/null 2>&1; then
         record "$name" 0
       else
         record "$name" 1 "output differs from expected/manifest.json"
@@ -130,8 +167,10 @@ for d in "$HERE"/vectors/canonical/*/; do
       # the HTML exactly right and the plain text wrong has one bug, not none.
       for fmt in html text; do
         [ "$fmt" = html ] && want="$d/expected/render.html" || want="$d/expected/render.txt"
-        if "$CLI" render "$fmt" "$c" 2>/dev/null |
-          diff -q - "$want" >/dev/null 2>&1; then
+        run_cli "$CLI" render "$fmt" "$c"
+        if declined; then
+          skip "$name ($fmt)" "canonical render not implemented"
+        elif diff -q "$OUT" "$want" >/dev/null 2>&1; then
           record "$name ($fmt)" 0
         else
           record "$name ($fmt)" 1 "output differs from $(basename "$want")"
@@ -146,5 +185,12 @@ done
 
 echo
 echo "-------------------------------------"
-printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
+if [ "$SKIP" -eq 0 ]; then
+  printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
+else
+  # Printed, never hidden: a score of "0 failed" means something different when
+  # a third of the vectors were never evaluated, and the reader of this line is
+  # entitled to know which.
+  printf 'passed %d, failed %d, not implemented %d\n' "$PASS" "$FAIL" "$SKIP"
+fi
 [ "$FAIL" -eq 0 ] || exit 1

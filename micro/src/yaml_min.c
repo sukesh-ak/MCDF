@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project */
 
-/* metadata.yaml, read as the small fixed shape the spec gives it rather than
+/* The line-oriented YAML primitives, plus metadata.yaml and the one field of
+ * encryption/policy.yaml a reader needs.
+ *
+ * metadata.yaml is read as the small fixed shape the spec gives it rather than
  * as YAML. Two constructs are understood and no more:
  *
  *   title: Minimal Document          top-level scalar, optionally quoted
@@ -19,13 +22,10 @@
 
 #include "internal.h"
 
-static int mm_is_space(char c) { return c == ' ' || c == '\t'; }
+int mm_is_space(char c) { return c == ' ' || c == '\t'; }
 
-/* Reads one line into `buf` (NUL-terminated), stripping a trailing CR.
- * Returns E_NOT_FOUND at end of member. `*truncated` is set when the line did
- * not fit; the rest of that line is consumed either way. */
-static mcdf_micro_status mm_line(struct mm_cursor *c, char *buf, size_t cap,
-                                 size_t *len, int *truncated) {
+mcdf_micro_status mm_line(struct mm_cursor *c, char *buf, size_t cap,
+                          size_t *len, int *truncated) {
   size_t n = 0;
   int any = 0;
 
@@ -50,8 +50,7 @@ static mcdf_micro_status mm_line(struct mm_cursor *c, char *buf, size_t cap,
   return MCDF_MICRO_OK;
 }
 
-/* Trims spaces and tabs from both ends, in place. */
-static void mm_trim(char **s, size_t *len) {
+void mm_trim(char **s, size_t *len) {
   char *p = *s;
   size_t n = *len;
   while (n > 0 && mm_is_space(p[0])) { ++p; --n; }
@@ -60,10 +59,7 @@ static void mm_trim(char **s, size_t *len) {
   *len = n;
 }
 
-/* Resolves a YAML scalar in place: strips one layer of quotes and the escapes
- * that can appear inside them, or cuts an unquoted value at a trailing
- * comment. Returns the resolved length. */
-static size_t mm_scalar(char *v, size_t len) {
+size_t mm_scalar(char *v, size_t len) {
   size_t i, n = 0;
 
   if (len >= 2 && v[0] == '"') {
@@ -105,10 +101,8 @@ static size_t mm_scalar(char *v, size_t len) {
   return len;
 }
 
-/* Splits "key: value" at the first colon followed by space or end-of-line.
- * Returns 0 if the line is not a mapping entry. */
-static int mm_split(char *line, size_t len, char **key, size_t *key_len,
-                    char **val, size_t *val_len) {
+int mm_split(char *line, size_t len, char **key, size_t *key_len, char **val,
+             size_t *val_len) {
   size_t i;
   for (i = 0; i < len; ++i) {
     if (line[i] != ':') continue;
@@ -213,4 +207,87 @@ mcdf_micro_status mcdf_micro_meta_author(mcdf_micro_reader *reader, size_t index
                                          char *dst, size_t dst_len,
                                          size_t *out_len) {
   return mm_meta_walk(reader, NULL, index, dst, dst_len, out_len);
+}
+
+/* ------------------------------------------------------------------ sealed */
+
+/* One field of encryption/policy.yaml, and only one: which members are
+ * ciphertext. Everything else in that file - the recipients, the wrapped keys,
+ * the structure attestation - belongs to operations this reader will never
+ * perform. What it does need is to know when bytes must not be parsed as their
+ * usual type (spec 5.2), because feeding ciphertext to a Markdown scanner
+ * yields confident nonsense rather than an error.
+ *
+ * Both spellings the file can use are read:
+ *
+ *   encrypted_files:            encrypted_files: [content.md, schema.yaml]
+ *     - content.md
+ */
+int mcdf_micro_is_sealed(mcdf_micro_reader *reader, const char *path) {
+  struct mm_cursor c;
+  char line[MCDF_MICRO_LINE_MAX];
+  int in_list = 0;
+
+  if (reader == NULL || path == NULL) return 0;
+  if (mm_cursor_open(reader, "encryption/policy.yaml", &c) != MCDF_MICRO_OK) {
+    return 0; /* no policy: nothing in this container is sealed */
+  }
+
+  for (;;) {
+    size_t len = 0, indent = 0;
+    int truncated = 0;
+    char *body, *key, *val;
+    size_t body_len, key_len, val_len;
+
+    const mcdf_micro_status st = mm_line(&c, line, sizeof line, &len, &truncated);
+    if (st == MCDF_MICRO_E_NOT_FOUND) break;
+    /* A policy this reader cannot finish reading is not a licence to call the
+     * member plaintext: "not sealed" is a claim, and an unreadable policy does
+     * not entitle it to one. */
+    if (st != MCDF_MICRO_OK || truncated) return 1;
+
+    while (indent < len && mm_is_space(line[indent])) ++indent;
+    body = line + indent;
+    body_len = len - indent;
+    if (body_len == 0 || body[0] == '#') continue;
+
+    if (indent == 0) {
+      in_list = 0;
+      if (!mm_split(body, body_len, &key, &key_len, &val, &val_len)) continue;
+      key[key_len] = '\0';
+      if (!mm_streq(key, "encrypted_files")) continue;
+      if (val_len == 0) { in_list = 1; continue; } /* block sequence follows */
+
+      /* Flow sequence: [a, b]. Split on commas inside the brackets. */
+      if (val[0] == '[') {
+        size_t i, start = 1;
+        for (i = 1; i <= val_len; ++i) {
+          char *item;
+          size_t item_len;
+          const char delim = (i == val_len) ? '\0' : val[i];
+          if (delim != '\0' && delim != ',' && delim != ']') continue;
+
+          item = val + start;
+          item_len = i - start;
+          mm_trim(&item, &item_len);
+          item_len = mm_scalar(item, item_len);
+          item[item_len] = '\0'; /* may land on the delimiter, already read */
+          if (item_len > 0 && mm_streq(item, path)) return 1;
+
+          if (delim == ']') break;
+          start = i + 1;
+        }
+      }
+      continue;
+    }
+
+    if (!in_list || body[0] != '-') continue;
+    ++body;
+    --body_len;
+    mm_trim(&body, &body_len);
+    body_len = mm_scalar(body, body_len);
+    body[body_len] = '\0';
+    if (body_len > 0 && mm_streq(body, path)) return 1;
+  }
+  return 0;
 }

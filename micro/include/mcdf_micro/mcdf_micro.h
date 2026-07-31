@@ -35,7 +35,7 @@ extern "C" {
 /* ------------------------------------------------------------------ version */
 
 #define MCDF_MICRO_VERSION_MAJOR 0
-#define MCDF_MICRO_VERSION_MINOR 1
+#define MCDF_MICRO_VERSION_MINOR 2
 #define MCDF_MICRO_VERSION_PATCH 0
 
 /* The MCDF format version this reader targets. */
@@ -54,7 +54,9 @@ extern "C" {
 
 /* Compile-time counterparts, for callers that branch rather than query. A
  * macro appears here only when the code behind it is in the build, so nothing
- * here can promise a capability that was not compiled. */
+ * here can promise a capability that was not compiled. Core is unconditional;
+ * MCDF_MICRO_HAS_INTEGRITY is defined by mcdf_micro_verify.h, so a caller that
+ * wants to branch on a feature includes the header that carries it. */
 #define MCDF_MICRO_HAS_CORE 1
 
 uint32_t mcdf_micro_features(void);
@@ -78,10 +80,19 @@ typedef enum mcdf_micro_status {
   MCDF_MICRO_E_RANGE,      /* read past the end of a member, or value too long
                               for the destination (see *out_len) */
 
-  /* Kit codes (conformance/errors.md). Reserved here so the mapping exists
-     from the start; the validation that raises them lands with the CLI. */
+  /* Kit codes (conformance/errors.md), spelled exactly as the kit spells them.
+     mcdf_micro_validate_core() raises the Core set; mcdf_micro_verify_manifest()
+     raises the Integrity set. E_ASSET_PATH_ESCAPE is defined but never raised
+     by this reader - see mcdf_micro_path_is_safe(). */
   MCDF_MICRO_E_MISSING_CONTENT,
+  MCDF_MICRO_E_SCHEMA_UNBOUND,
+  MCDF_MICRO_E_REQUIRED_SECTION_MISSING,
   MCDF_MICRO_E_ASSET_PATH_ESCAPE,
+  MCDF_MICRO_E_MISSING_MANIFEST,
+  MCDF_MICRO_E_MANIFEST_HASH_MISMATCH,
+  MCDF_MICRO_E_MANIFEST_MISSING_FILE,
+  MCDF_MICRO_E_MANIFEST_EXTRA_FILE,
+  MCDF_MICRO_E_ALGO_NOT_ALLOWED,
 
   /* Honest-gap signals. E_DISABLED means a feature gate removed this code
      from the build; E_UNIMPLEMENTED means this build did not evaluate a
@@ -104,6 +115,12 @@ const char *mcdf_micro_status_str(mcdf_micro_status status);
  * hex digest is 64 bytes; the version and algorithm fields are shorter. A
  * longer value is reported E_RANGE rather than silently truncated. */
 #define MCDF_MICRO_VALUE_MAX 128
+
+/* The longest section id / heading anchor this reader will match. Spec 4.2
+ * constrains an id to [A-Za-z0-9._-]+ and gives no length bound; 128 is far
+ * past any real one, and a longer id is reported E_RANGE rather than matched
+ * on a prefix. */
+#define MCDF_MICRO_ID_MAX 128
 
 /* ------------------------------------------------------------------- source */
 
@@ -237,6 +254,87 @@ mcdf_micro_status mcdf_micro_manifest_at(mcdf_micro_reader *reader, size_t index
                                          size_t *path_out_len,
                                          char *hash_dst, size_t hash_dst_len,
                                          size_t *hash_out_len);
+
+/* Non-zero if the manifest MUST NOT list `path`: manifest.json itself,
+ * audit.log, audit.checkpoint, and anything under signatures/. The rule is
+ * normative (conformance/errors.md, "Manifest membership"), which is why it is
+ * published rather than left inside the verifier - a caller that builds a
+ * manifest has to apply exactly this rule to agree with one that checks it. */
+int mcdf_micro_manifest_excluded(const char *path);
+
+/* ----------------------------------------------------------------- schema */
+
+/* schema.yaml, read as the small fixed shape spec 4.2 gives it: a `sections:`
+ * block sequence whose items carry an `id:` and optionally `required:`. Only
+ * the fields that decide binding are read - `title` and `document_type` are a
+ * presentation concern this reader has no use for.
+ *
+ * E_NOT_FOUND when schema.yaml is absent, which is not a defect: a document
+ * with no schema makes no structural claims. */
+mcdf_micro_status mcdf_micro_schema_count(mcdf_micro_reader *reader, size_t *out);
+
+/* The n-th section's id, in declaration order. `required` may be NULL. */
+mcdf_micro_status mcdf_micro_schema_at(mcdf_micro_reader *reader, size_t index,
+                                       char *dst, size_t dst_len,
+                                       size_t *out_len, int *required);
+
+/* --------------------------------------------------------------- anchors */
+
+/* Heading anchors in content.md: the `{#id}` at the end of an ATX heading
+ * (`## Terms {#terms}`) or of the last line of a setext heading. This is what
+ * spec 4.2 binds `schema.yaml` sections to.
+ *
+ * Deliberately a line scanner rather than a CommonMark parse, and deliberately
+ * not routed through md4c when MCDF_MICRO_ENABLE_RENDER is on: a build's
+ * feature gates must never change which documents it considers valid. The
+ * documented limit is that an anchor is only seen on a top-level ATX or setext
+ * heading - not on one nested inside a block quote or a list item, where no
+ * MCDF writer puts a bound section.
+ *
+ * E_NOT_FOUND when content.md is absent - the same signal as "no such anchor",
+ * because to a caller asking whether a section binds, it is. */
+mcdf_micro_status mcdf_micro_anchor_count(mcdf_micro_reader *reader, size_t *out);
+
+/* The n-th anchor, in document order. `level` (1-6) may be NULL. */
+mcdf_micro_status mcdf_micro_anchor_at(mcdf_micro_reader *reader, size_t index,
+                                       char *dst, size_t dst_len,
+                                       size_t *out_len, int *level);
+
+/* OK if `id` is an anchor in content.md, E_NOT_FOUND if it is not. */
+mcdf_micro_status mcdf_micro_has_anchor(mcdf_micro_reader *reader, const char *id);
+
+/* ---------------------------------------------------------------- sealed */
+
+/* Non-zero if `path`'s stored bytes are ciphertext and MUST NOT be parsed as
+ * the member's usual type (spec 5.2) - either because encryption/policy.yaml
+ * lists it in `encrypted_files`, or because a policy is present and this
+ * reader could not read it, in which case "not sealed" is not a claim it is
+ * entitled to make. */
+int mcdf_micro_is_sealed(mcdf_micro_reader *reader, const char *path);
+
+/* -------------------------------------------------------------- validate */
+
+/* Reports one finding: a kit code plus the member path or section id it
+ * concerns. The callback must not throw, longjmp, or call back into the
+ * reader. `detail` is only valid for the duration of the call. */
+typedef void (*mcdf_micro_issue_fn)(void *ctx, mcdf_micro_status code,
+                                    const char *detail);
+
+/* The Core profile: content.md is present, and every schema.yaml section binds
+ * to a heading anchor (spec 4.2). Raises E_MISSING_CONTENT,
+ * E_REQUIRED_SECTION_MISSING and E_SCHEMA_UNBOUND through `on_issue`, which may
+ * be NULL when only the count is wanted.
+ *
+ * Over a sealed content.md the binding is evaluated against the policy's
+ * structure attestation, which this reader does not implement - so it reports
+ * E_UNIMPLEMENTED for that check rather than reporting sections as missing when
+ * they are merely unreadable.
+ *
+ * The return value says whether the walk *ran*: OK means it did and
+ * `*out_issues` is how much it found. `*out_issues` may be NULL. */
+mcdf_micro_status mcdf_micro_validate_core(mcdf_micro_reader *reader,
+                                           mcdf_micro_issue_fn on_issue,
+                                           void *ctx, size_t *out_issues);
 
 #ifdef __cplusplus
 }  /* extern "C" */

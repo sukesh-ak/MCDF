@@ -79,6 +79,34 @@ mcdf_micro_status mm_cursor_open(mcdf_micro_reader *r, const char *path,
  * end signal, not a defect), or E_IO. */
 mcdf_micro_status mm_cursor_next(struct mm_cursor *c, unsigned char *ch);
 
+/* ---- line-oriented YAML helpers (yaml_min.c) ---------------------------- */
+
+/* Shared by every reader of the spec's small YAML shapes - metadata.yaml,
+ * schema.yaml, encryption/policy.yaml. None of them needs a conforming YAML
+ * parser, and all three need the same five primitives, so they live in one
+ * place rather than being re-derived per file. */
+
+int mm_is_space(char c);
+
+/* Reads one line into `buf` (NUL-terminated), stripping a trailing CR.
+ * Returns E_NOT_FOUND at end of member. `*truncated` is set when the line did
+ * not fit; the rest of that line is consumed either way. */
+mcdf_micro_status mm_line(struct mm_cursor *c, char *buf, size_t cap,
+                          size_t *len, int *truncated);
+
+/* Trims spaces and tabs from both ends, in place. */
+void mm_trim(char **s, size_t *len);
+
+/* Resolves a YAML scalar in place: strips one layer of quotes and the escapes
+ * that can appear inside them, or cuts an unquoted value at a trailing
+ * comment. Returns the resolved length. */
+size_t mm_scalar(char *v, size_t len);
+
+/* Splits "key: value" at the first colon followed by space or end-of-line.
+ * Returns 0 if the line is not a mapping entry. */
+int mm_split(char *line, size_t len, char **key, size_t *key_len, char **val,
+             size_t *val_len);
+
 /* ---- small helpers shared by the parsers ------------------------------- */
 
 size_t mm_strlen(const char *s);

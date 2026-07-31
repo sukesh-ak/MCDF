@@ -53,6 +53,20 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # mcdf_micro is built for a part chosen for its flash budget, so silent
+      # size growth is a defect. This is the cheapest possible tripwire: print
+      # .text/.rodata per gate configuration and let a human read the trend.
+      # Linux only - `size` is a binutils tool and the number that matters is
+      # the one from a cross-toolchain anyway.
+      - name: Report mcdf_micro size per gate configuration
+        if: runner.os == 'Linux'
+        run: |
+          for a in build/micro/libmcdf_micro*.a; do
+            [ -e "$a" ] || continue   # a glob that matched nothing is not a failure
+            printf '== %s\n' "$(basename "$a")"
+            size -t "$a" | awk 'NR == 1 || $NF == "(TOTALS)"'
+          done
+
   # Build the MCDF Studio GUI editor and publish the binary as an artifact.
   # GUI apps can't be launched headlessly in CI, so this verifies the build
   # compiles and links, then uploads the executable for manual testing.
@@ -115,8 +129,8 @@ jobs:
             build/apps/studio/mcdf-studio
           if-no-files-found: error
 
-  # Coverage-guided fuzzing smoke (M8 hardening): libFuzzer + ASan over the
-  # untrusted-input surfaces (TAR unpack, YAML/JSON member parsers, markdown).
+  # Coverage-guided fuzzing smoke: libFuzzer + ASan over the untrusted-input
+  # surfaces (TAR unpack, YAML/JSON member parsers, markdown, the C reader).
   # Short seeded runs to catch regressions; longer campaigns are manual.
   fuzz:
     name: fuzz
@@ -157,18 +171,30 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build fuzzers
-        run: cmake --build build --parallel --target fuzz_unpack fuzz_parsers fuzz_markdown
+        run: |
+          cmake --build build --parallel --target \
+            fuzz_unpack fuzz_parsers fuzz_markdown \
+            fuzz_micro_tar fuzz_micro_member
 
       - name: Fuzz (30s per target, seeded)
         env:
           ASAN_OPTIONS: detect_leaks=0  # OpenSSL init tables trip LSan
         # First corpus dir is libFuzzer's WRITABLE output; keep the committed
         # seeds read-only by passing a scratch dir first.
+        #
+        # The mcdf_micro targets reuse the existing corpora rather than getting
+        # copies: micro_tar walks archives (corpus/unpack), micro_member wraps
+        # raw bytes as one member (corpus/parsers), and fuzzing both
+        # implementations from the same inputs is the point.
         run: |
-          for t in unpack parsers markdown; do
-            mkdir -p /tmp/corpus-$t
-            ./build/fuzz/fuzz_$t -max_total_time=30 -print_final_stats=1 /tmp/corpus-$t fuzz/corpus/$t
-          done
+          fuzz_one() {  # target, seed dir
+            mkdir -p "/tmp/corpus-$1"
+            "./build/fuzz/fuzz_$1" -max_total_time=30 -print_final_stats=1 \
+              "/tmp/corpus-$1" "$2"
+          }
+          for t in unpack parsers markdown; do fuzz_one "$t" "fuzz/corpus/$t"; done
+          fuzz_one micro_tar fuzz/corpus/unpack
+          fuzz_one micro_member fuzz/corpus/parsers
 
   # The reproducible Linux build, exactly as a contributor would run it.
   docker:

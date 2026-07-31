@@ -59,6 +59,8 @@ conformance/   schemas, test vectors, error taxonomy, runner
 examples/      a complete signed sample document (packed + unpacked)
 include/mcdf/  public library headers
 src/           libmcdf implementation (container, crypto, model, serialize, core)
+micro/         mcdf_micro — a portable C99 reader for microcontrollers
+               (no allocation, no filesystem, no dependencies)
 apps/          clients built on libmcdf
   cli/           the `mcdf` command-line client
   studio/        MCDF Studio — the Dear ImGui desktop editor
@@ -86,6 +88,15 @@ entirely. The signatures in the signed and encrypted vectors were produced by
 `libmcdf` and verify there with no shared code, which is the claim made
 checkable. It is both a worked example for your own port and an npm library you
 can build on.
+
+**Twice, in fact.** [`mcdf_micro`](micro) is a **C99** reader small enough for a
+microcontroller — no allocation, no filesystem, no dependencies, and read-only
+forever. It reads the required TAR form through a caller-supplied callback and
+keeps its whole index in a caller-supplied arena, so an SD card, a flash
+partition and a host `FILE*` are the same three fields. It implements **Core and
+Integrity**, scores clean on those vectors, and reports `E_UNIMPLEMENTED` for
+the profiles it does not evaluate rather than claiming them. If your target is
+constrained, start there rather than from the C++ engine.
 
 ## MCDF Web — the accessible client
 

@@ -82,9 +82,21 @@ const char *mcdf_micro_status_str(mcdf_micro_status status) {
     case MCDF_MICRO_E_PARSE:         return "E_PARSE";
     case MCDF_MICRO_E_NOT_FOUND:     return "E_NOT_FOUND";
     case MCDF_MICRO_E_RANGE:         return "E_RANGE";
-    /* Kit spellings, verbatim from conformance/errors.md. */
+    /* Kit spellings, verbatim from conformance/errors.md. A harness greps for
+     * these, so they are the one set of strings in this library that may not
+     * be reworded. */
     case MCDF_MICRO_E_MISSING_CONTENT:   return "E_MISSING_CONTENT";
+    case MCDF_MICRO_E_SCHEMA_UNBOUND:    return "E_SCHEMA_UNBOUND";
+    case MCDF_MICRO_E_REQUIRED_SECTION_MISSING:
+      return "E_REQUIRED_SECTION_MISSING";
     case MCDF_MICRO_E_ASSET_PATH_ESCAPE: return "E_ASSET_PATH_ESCAPE";
+    case MCDF_MICRO_E_MISSING_MANIFEST:  return "E_MISSING_MANIFEST";
+    case MCDF_MICRO_E_MANIFEST_HASH_MISMATCH:
+      return "E_MANIFEST_HASH_MISMATCH";
+    case MCDF_MICRO_E_MANIFEST_MISSING_FILE:
+      return "E_MANIFEST_MISSING_FILE";
+    case MCDF_MICRO_E_MANIFEST_EXTRA_FILE: return "E_MANIFEST_EXTRA_FILE";
+    case MCDF_MICRO_E_ALGO_NOT_ALLOWED:  return "E_ALGO_NOT_ALLOWED";
     case MCDF_MICRO_E_DISABLED:          return "E_DISABLED";
     case MCDF_MICRO_E_UNIMPLEMENTED:     return "E_UNIMPLEMENTED";
   }

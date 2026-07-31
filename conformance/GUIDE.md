@@ -223,6 +223,14 @@ Expose `validate <container> --profile <p>` (exit 0 = valid), `manifest
 against the vectors. Structural output can also be checked with any JSON-Schema
 validator using [`schemas/`](schemas).
 
+**Stopping partway is expected.** For a profile or verb you do not implement,
+exit non-zero with `E_UNIMPLEMENTED` in the output. The runner records that
+vector `N/A` instead of failing it and prints a `not implemented` count
+alongside the score, so you get a clean result for the profiles you claim
+without the ones you don't looking like defects. What you must never do is
+report a profile as valid without running its checks — see
+[`errors.md`](errors.md).
+
 > **Maintainers: the two runners are a pair.** `run.sh` and `run.ps1` perform
 > the same checks and must stay in step — a check added to one has to be added
 > to the other, or an implementation scores differently depending on who runs

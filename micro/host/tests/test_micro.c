@@ -20,6 +20,12 @@
 #include <string.h>
 
 #include "mcdf_micro/mcdf_micro.h"
+#include "mcdf_micro/mcdf_micro_verify.h"
+
+/* A published conformance vector, in the one serialization this reader has.
+ * Scoring against the kit is the CLI's job; these use the same containers to
+ * check the library underneath it, so a failure says which of the two broke. */
+#define VECTOR(name) MCDF_MICRO_VECTORS "/" name "/container.mcdf"
 
 static int g_fail = 0;
 static int g_checks = 0;
@@ -747,22 +753,602 @@ static void test_path_safety(void) {
   CHECK(!mcdf_micro_path_is_safe(NULL));
 }
 
+/* ------------------------------------------------------------ issue log */
+
+/* The validation entry points report through a callback rather than a list,
+ * because the core never allocates. A test needs the list, so it builds one. */
+struct issue_log {
+  mcdf_micro_status codes[16];
+  char              details[16][160];
+  size_t            n;
+};
+
+static void log_issue(void *ctx, mcdf_micro_status code, const char *detail) {
+  struct issue_log *log = (struct issue_log *)ctx;
+  if (log->n < sizeof log->codes / sizeof log->codes[0]) {
+    log->codes[log->n] = code;
+    strncpy(log->details[log->n], detail, sizeof log->details[0] - 1);
+    log->details[log->n][sizeof log->details[0] - 1] = '\0';
+  }
+  ++log->n;
+}
+
+static int logged(const struct issue_log *log, mcdf_micro_status code,
+                  const char *detail) {
+  size_t i;
+  for (i = 0; i < log->n; ++i) {
+    if (log->codes[i] == code && strcmp(log->details[i], detail) == 0) return 1;
+  }
+  return 0;
+}
+
+/* ------------------------------------------------------------- schema.yaml */
+
+static void test_schema(void) {
+  mcdf_micro_source src;
+  struct mem_source mem;
+  mcdf_micro_reader *r = NULL;
+  char id[MCDF_MICRO_ID_MAX];
+  size_t count = 0, len = 0;
+  int required = 0;
+
+  section("schema.yaml sections");
+
+  tar_reset();
+  tar_add("schema.yaml",
+          "document_type: contract\n"
+          "sections:\n"
+          "  - id: overview\n"
+          "    title: Overview\n"
+          "  - id: terms\n"
+          "    title: Terms and Conditions\n"
+          "    required: true\n"
+          "  - title: a section that declares no id\n"
+          "  - id: appendix\n"
+          "    required: \"yes\"\n"
+          "version: 1\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+
+  CHECK_ST(mcdf_micro_schema_count(r, &count), MCDF_MICRO_OK);
+  CHECK(count == 4);
+
+  CHECK_ST(mcdf_micro_schema_at(r, 0, id, sizeof id, &len, &required),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "overview") == 0 && required == 0 && len == 8);
+
+  CHECK_ST(mcdf_micro_schema_at(r, 1, id, sizeof id, &len, &required),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "terms") == 0 && required == 1);
+
+  /* A section with no id is still a section: counted, reported as the empty id
+   * that binds to nothing. Skipping it would renumber every one after it. */
+  CHECK_ST(mcdf_micro_schema_at(r, 2, id, sizeof id, &len, &required),
+           MCDF_MICRO_OK);
+  CHECK(len == 0 && required == 0);
+
+  /* `required: "yes"` is true, matching what the reference's YAML library
+   * resolves - the two implementations have to agree on which sections a
+   * document says are mandatory. */
+  CHECK_ST(mcdf_micro_schema_at(r, 3, id, sizeof id, &len, &required),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "appendix") == 0 && required == 1);
+
+  CHECK_ST(mcdf_micro_schema_at(r, 4, id, sizeof id, &len, &required),
+           MCDF_MICRO_E_NOT_FOUND);
+
+  /* An empty flow sequence is a complete answer: no sections. */
+  tar_reset();
+  tar_add("schema.yaml", "document_type: note\nsections: []\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_schema_count(r, &count), MCDF_MICRO_OK);
+  CHECK(count == 0);
+
+  /* No schema at all is not a defect - a document may make no structural
+   * claims - so it is distinguishable from an empty one. */
+  tar_reset();
+  tar_add("content.md", "# x\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_schema_count(r, &count), MCDF_MICRO_E_NOT_FOUND);
+}
+
+/* ---------------------------------------------------------- heading anchors */
+
+static void test_anchors(void) {
+  mcdf_micro_source src;
+  struct mem_source mem;
+  mcdf_micro_reader *r = NULL;
+  char id[MCDF_MICRO_ID_MAX];
+  char content[2048];
+  size_t count = 0, len = 0, i;
+  int level = 0;
+
+  section("content.md heading anchors");
+
+  tar_reset();
+  tar_add("content.md",
+          "# Overview {#overview}\n"
+          "\n"
+          "A paragraph mentioning a # hash and a {#brace} that is not one.\n"
+          "\n"
+          "## Terms and Conditions {#terms} ##\n"
+          "\n"
+          "```\n"
+          "# fenced code {#fenced}\n"
+          "```\n"
+          "\n"
+          "Setext Title {#setext}\n"
+          "======================\n"
+          "\n"
+          "Second Level {#second}\n"
+          "---\n"
+          "\n"
+          "    # indented code {#indented}\n"
+          "\n"
+          "\t# tab-indented code {#tabbed}\n"
+          "\n"
+          "#no-space {#nospace}\n"
+          "\n"
+          "####### seven hashes {#seven}\n"
+          "\n"
+          "### Empty anchor {#}\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+
+  CHECK_ST(mcdf_micro_anchor_count(r, &count), MCDF_MICRO_OK);
+  CHECK(count == 4);
+
+  CHECK_ST(mcdf_micro_anchor_at(r, 0, id, sizeof id, &len, &level),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "overview") == 0 && level == 1);
+
+  /* The ATX closing sequence is not part of the heading text, so the anchor is
+   * still the last thing in it. */
+  CHECK_ST(mcdf_micro_anchor_at(r, 1, id, sizeof id, &len, &level),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "terms") == 0 && level == 2);
+
+  CHECK_ST(mcdf_micro_anchor_at(r, 2, id, sizeof id, &len, &level),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "setext") == 0 && level == 1);
+
+  CHECK_ST(mcdf_micro_anchor_at(r, 3, id, sizeof id, &len, &level),
+           MCDF_MICRO_OK);
+  CHECK(strcmp(id, "second") == 0 && level == 2);
+
+  CHECK_ST(mcdf_micro_anchor_at(r, 4, id, sizeof id, &len, &level),
+           MCDF_MICRO_E_NOT_FOUND);
+
+  CHECK_ST(mcdf_micro_has_anchor(r, "overview"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "second"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "fenced"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "indented"), MCDF_MICRO_E_NOT_FOUND);
+  /* A tab is four columns, so this is indented code too. Counting it as one
+   * byte of indent would make it a heading here and code in the reference -
+   * two implementations disagreeing about whether a document is valid. */
+  CHECK_ST(mcdf_micro_has_anchor(r, "tabbed"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "nospace"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "seven"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "brace"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "over"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, ""), MCDF_MICRO_E_NOT_FOUND);
+
+  /* CRLF, because a document authored on Windows is the same document. */
+  tar_reset();
+  tar_add("content.md",
+          "# Overview {#overview}\r\n"
+          "\r\n"
+          "Setext {#crlf}\r\n"
+          "======\r\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "overview"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "crlf"), MCDF_MICRO_OK);
+
+  /* A heading far longer than any line buffer. The anchor is at the end, so
+   * the scanner keeps a rolling tail rather than a prefix and a verbose
+   * document is not a rejected one. */
+  memcpy(content, "# ", 2);
+  for (i = 2; i < 1500; ++i) content[i] = 'x';
+  memcpy(content + 1500, " {#tail}\n", 10);
+  tar_reset();
+  tar_add("content.md", content);
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "tail"), MCDF_MICRO_OK);
+
+  /* An id longer than the reader will match is refused, not truncated to a
+   * prefix that would bind the wrong section. */
+  memcpy(content, "# T {#", 6);
+  for (i = 6; i < 6 + MCDF_MICRO_ID_MAX + 10; ++i) content[i] = 'a';
+  memcpy(content + 6 + MCDF_MICRO_ID_MAX + 10, "}\n", 3);
+  tar_reset();
+  tar_add("content.md", content);
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_anchor_at(r, 0, id, sizeof id, &len, NULL),
+           MCDF_MICRO_E_RANGE);
+  CHECK(len == MCDF_MICRO_ID_MAX + 10);
+
+  /* No content.md: nothing to scan, and that is not a parse failure. */
+  tar_reset();
+  tar_add("metadata.yaml", "title: x\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "overview"), MCDF_MICRO_E_NOT_FOUND);
+}
+
+/* ---------------------------------------------------------------- sealed */
+
+static void test_sealed(void) {
+  mcdf_micro_source src;
+  struct mem_source mem;
+  mcdf_micro_reader *r = NULL;
+
+  section("sealed members (spec 5.2)");
+
+  tar_reset();
+  tar_add("content.md", "ciphertext");
+  tar_add("encryption/policy.yaml",
+          "method: aes-256-gcm\n"
+          "key_management: hpke\n"
+          "encrypted_files:\n"
+          "  - content.md\n"
+          "recipients:\n"
+          "  - id: did:key:z6LS\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK(mcdf_micro_is_sealed(r, "content.md") != 0);
+  CHECK(mcdf_micro_is_sealed(r, "schema.yaml") == 0);
+
+  tar_reset();
+  tar_add("content.md", "ciphertext");
+  tar_add("encryption/policy.yaml",
+          "encrypted_files: [content.md, assets/a.png]\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK(mcdf_micro_is_sealed(r, "content.md") != 0);
+  CHECK(mcdf_micro_is_sealed(r, "assets/a.png") != 0);
+  CHECK(mcdf_micro_is_sealed(r, "metadata.yaml") == 0);
+
+  /* No policy, nothing sealed. */
+  tar_reset();
+  tar_add("content.md", "# x {#x}\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK(mcdf_micro_is_sealed(r, "content.md") == 0);
+
+  /* A policy this reader cannot finish reading does not earn the member a
+   * "plaintext" verdict - "not sealed" is a claim, and it has no basis for it. */
+  tar_reset();
+  tar_add("content.md", "ciphertext");
+  tar_add("encryption/policy.yaml", "encrypted_files:\n  - \001\002 not\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK(mcdf_micro_is_sealed(r, "content.md") == 0); /* readable, just unlisted */
+}
+
+/* ------------------------------------------------------- Core validation */
+
+static void test_validate_core(void) {
+  struct fixture f;
+  struct issue_log log;
+  mcdf_micro_source src;
+  struct mem_source mem;
+  mcdf_micro_reader *r = NULL;
+
+  section("validate: the Core profile");
+
+  /* The kit's own vectors, so this checks the same containers the harness
+   * scores rather than a paraphrase of them. */
+  if (fixture_open(&f, VECTOR("valid/minimal"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_validate_core(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 0);
+    fixture_close(&f);
+  }
+
+  if (fixture_open(&f, VECTOR("invalid/missing-content"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_validate_core(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(logged(&log, MCDF_MICRO_E_MISSING_CONTENT, "content.md"));
+    fixture_close(&f);
+  }
+
+  if (fixture_open(&f, VECTOR("invalid/required-section-missing"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_validate_core(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(logged(&log, MCDF_MICRO_E_REQUIRED_SECTION_MISSING, "terms"));
+    fixture_close(&f);
+  }
+
+  /* A section that is declared but not marked required is unbound, not
+   * missing: the same document, two different verdicts, and the kit's error
+   * taxonomy distinguishes them. */
+  tar_reset();
+  tar_add("content.md", "# Overview {#overview}\n");
+  tar_add("schema.yaml",
+          "sections:\n"
+          "  - id: overview\n"
+          "  - id: optional-extra\n"
+          "  - id: mandatory\n"
+          "    required: true\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  log.n = 0;
+  CHECK_ST(mcdf_micro_validate_core(r, log_issue, &log, NULL), MCDF_MICRO_OK);
+  CHECK(log.n == 2);
+  CHECK(logged(&log, MCDF_MICRO_E_SCHEMA_UNBOUND, "optional-extra"));
+  CHECK(logged(&log, MCDF_MICRO_E_REQUIRED_SECTION_MISSING, "mandatory"));
+
+  /* No schema: no structural claims, nothing to check. */
+  tar_reset();
+  tar_add("content.md", "just prose\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  log.n = 0;
+  CHECK_ST(mcdf_micro_validate_core(r, log_issue, &log, NULL), MCDF_MICRO_OK);
+  CHECK(log.n == 0);
+
+  /* Sealed content: the headings are unreadable, so this reader says so once
+   * rather than reporting every section as missing. Blaming the document for
+   * an implementation's gap is the wrong answer, and the kit names it as such. */
+  tar_reset();
+  tar_add("content.md", "ciphertext");
+  tar_add("schema.yaml", "sections:\n  - id: terms\n    required: true\n");
+  tar_add("encryption/policy.yaml", "encrypted_files:\n  - content.md\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  log.n = 0;
+  CHECK_ST(mcdf_micro_validate_core(r, log_issue, &log, NULL), MCDF_MICRO_OK);
+  CHECK(log.n == 1);
+  CHECK(log.codes[0] == MCDF_MICRO_E_UNIMPLEMENTED);
+
+  /* The counter is usable on its own, for a caller with nowhere to put a
+   * callback. */
+  {
+    size_t issues = 99;
+    CHECK_ST(mcdf_micro_validate_core(r, NULL, NULL, &issues), MCDF_MICRO_OK);
+    CHECK(issues == 1);
+  }
+}
+
+/* ---------------------------------------------------- the Integrity gate */
+
+static void test_manifest_membership(void) {
+  section("manifest membership (normative, conformance/errors.md)");
+
+  CHECK(mcdf_micro_manifest_excluded("manifest.json"));
+  CHECK(mcdf_micro_manifest_excluded("audit.log"));
+  CHECK(mcdf_micro_manifest_excluded("audit.checkpoint"));
+  CHECK(mcdf_micro_manifest_excluded("signatures/author.sig"));
+  CHECK(mcdf_micro_manifest_excluded("signatures/"));
+
+  CHECK(!mcdf_micro_manifest_excluded("content.md"));
+  CHECK(!mcdf_micro_manifest_excluded("metadata.yaml"));
+  CHECK(!mcdf_micro_manifest_excluded("signatures"));
+  CHECK(!mcdf_micro_manifest_excluded("assets/signatures/x.png"));
+  CHECK(!mcdf_micro_manifest_excluded("audit.log.bak"));
+  CHECK(!mcdf_micro_manifest_excluded(""));
+}
+
+static void test_integrity(void) {
+  struct fixture f;
+  struct issue_log log;
+  char hex[MCDF_MICRO_SHA256_HEX_SIZE];
+  mcdf_micro_sha256 sha;
+  unsigned char digest[MCDF_MICRO_SHA256_SIZE];
+  size_t i;
+
+  section("integrity: SHA-256 and manifest verification");
+
+#if !defined(MCDF_MICRO_HAS_INTEGRITY)
+  /* The gate is off. Every entry point still exists - which is what lets one
+   * piece of caller code compile against every configuration - and every one
+   * of them refuses rather than pretending. */
+  CHECK_ST(mcdf_micro_sha256_init(&sha), MCDF_MICRO_E_DISABLED);
+  CHECK_ST(mcdf_micro_sha256_update(&sha, "abc", 3), MCDF_MICRO_E_DISABLED);
+  CHECK_ST(mcdf_micro_sha256_final(&sha, digest), MCDF_MICRO_E_DISABLED);
+  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_INTEGRITY) == 0);
+  if (fixture_open(&f, VECTOR("valid/minimal"))) {
+    CHECK_ST(mcdf_micro_hash_member(f.r, "content.md", hex, sizeof hex),
+             MCDF_MICRO_E_DISABLED);
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_E_DISABLED);
+    fixture_close(&f);
+  }
+  (void)i;
+#else
+  /* FIPS 180-4 known answers, then the same digest reached one byte at a time,
+   * because the streaming path is the one a device actually uses. */
+  CHECK_ST(mcdf_micro_sha256_init(&sha), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_sha256_update(&sha, "abc", 3), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_sha256_final(&sha, digest), MCDF_MICRO_OK);
+  CHECK(digest[0] == 0xBA && digest[1] == 0x78 && digest[2] == 0x16 &&
+        digest[31] == 0xAD);
+
+  CHECK_ST(mcdf_micro_sha256_init(&sha), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_sha256_final(&sha, digest), MCDF_MICRO_OK);
+  CHECK(digest[0] == 0xE3 && digest[1] == 0xB0 && digest[31] == 0x55);
+
+  {
+    /* 448 bits, the boundary where the length block needs a second pass. */
+    static const char kLong[] =
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    CHECK_ST(mcdf_micro_sha256_init(&sha), MCDF_MICRO_OK);
+    for (i = 0; i < sizeof kLong - 1; ++i) {
+      CHECK_ST(mcdf_micro_sha256_update(&sha, kLong + i, 1), MCDF_MICRO_OK);
+    }
+    CHECK_ST(mcdf_micro_sha256_final(&sha, digest), MCDF_MICRO_OK);
+    CHECK(digest[0] == 0x24 && digest[1] == 0x8D && digest[31] == 0xC1);
+  }
+
+  /* A digest the reference runtime wrote, recomputed here. This is the check
+   * that matters: two implementations agreeing on bytes neither wrote for the
+   * other. */
+  if (fixture_open(&f, VECTOR("canonical/manifest"))) {
+    CHECK_ST(mcdf_micro_hash_member(f.r, "content.md", hex, sizeof hex),
+             MCDF_MICRO_OK);
+    CHECK(strcmp(hex,
+                 "a35970c64c935487af43f4cfcbae9adb825b446065174cd60801bf22d98"
+                 "bbf06") == 0);
+    CHECK_ST(mcdf_micro_hash_member(f.r, "nope.md", hex, sizeof hex),
+             MCDF_MICRO_E_NOT_FOUND);
+    CHECK_ST(mcdf_micro_hash_member(f.r, "content.md", hex, 16),
+             MCDF_MICRO_E_RANGE);
+    fixture_close(&f);
+  }
+
+  if (fixture_open(&f, VECTOR("valid/minimal"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 0);
+    fixture_close(&f);
+  }
+
+  if (fixture_open(&f, VECTOR("invalid/hash-mismatch"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(logged(&log, MCDF_MICRO_E_MANIFEST_HASH_MISMATCH, "content.md"));
+    fixture_close(&f);
+  }
+
+  if (fixture_open(&f, VECTOR("invalid/extra-file"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(logged(&log, MCDF_MICRO_E_MANIFEST_EXTRA_FILE, "extra.txt"));
+    fixture_close(&f);
+  }
+
+  /* An algorithm off the allow-list stops the walk: nothing below that line
+   * could mean anything, and reporting every file as a mismatch would bury the
+   * one fact that explains all of them. */
+  if (fixture_open(&f, VECTOR("invalid/bad-algo"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(log.codes[0] == MCDF_MICRO_E_ALGO_NOT_ALLOWED);
+    fixture_close(&f);
+  }
+
+  /* Signatures are exempt from the manifest, so a signed container verifies at
+   * Integrity without this reader knowing anything about signatures. */
+  if (fixture_open(&f, VECTOR("valid/signed"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 0);
+    fixture_close(&f);
+  }
+
+  /* So is an encrypted one: the manifest hashes the ciphertext, which is what
+   * makes Integrity hold over a sealed document without a key. */
+  if (fixture_open(&f, VECTOR("valid/encrypted"))) {
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(f.r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 0);
+    fixture_close(&f);
+  }
+
+  {
+    mcdf_micro_source src;
+    struct mem_source mem;
+    mcdf_micro_reader *r = NULL;
+
+    tar_reset();
+    tar_add("content.md", "x\n");
+    tar_end();
+    tar_source(&src, &mem);
+    CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 1);
+    CHECK(logged(&log, MCDF_MICRO_E_MISSING_MANIFEST, "manifest.json"));
+
+    tar_reset();
+    tar_add("content.md", "x\n");
+    tar_add("manifest.json",
+            "{\"files\":{\"content.md\":\"00\",\"gone.md\":\"11\"},"
+            "\"hash_algorithm\":\"sha256\",\"mcdf_version\":\"1.0\"}");
+    tar_end();
+    tar_source(&src, &mem);
+    CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+    log.n = 0;
+    CHECK_ST(mcdf_micro_verify_manifest(r, log_issue, &log, NULL),
+             MCDF_MICRO_OK);
+    CHECK(log.n == 2);
+    CHECK(logged(&log, MCDF_MICRO_E_MANIFEST_HASH_MISMATCH, "content.md"));
+    CHECK(logged(&log, MCDF_MICRO_E_MANIFEST_MISSING_FILE, "gone.md"));
+  }
+#endif
+}
+
 static void test_reporting(void) {
+  const uint32_t bits = mcdf_micro_features();
+
   section("what this build says it is");
 
-  /* This build is the container reader: Core and nothing else. A build must never
-   * claim a profile whose code is not compiled in. */
-  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_CORE) != 0);
-  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_INTEGRITY) == 0);
-  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_SIGNED) == 0);
-  CHECK((mcdf_micro_features() & MCDF_MICRO_FEATURE_RENDER) == 0);
+  /* A build must never claim a profile whose code is not compiled in, and the
+   * answer comes from the gates rather than from this file asserting it. */
+  CHECK((bits & MCDF_MICRO_FEATURE_CORE) != 0);
+#if defined(MCDF_MICRO_HAS_INTEGRITY)
+  CHECK((bits & MCDF_MICRO_FEATURE_INTEGRITY) != 0);
+#else
+  CHECK((bits & MCDF_MICRO_FEATURE_INTEGRITY) == 0);
+#endif
+  CHECK((bits & MCDF_MICRO_FEATURE_SIGNED) == 0);
+  CHECK((bits & MCDF_MICRO_FEATURE_RENDER) == 0);
 
   /* Kit codes keep the kit's spelling, so a harness can print them straight. */
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_OK), "OK") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_MISSING_CONTENT),
                "E_MISSING_CONTENT") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_SCHEMA_UNBOUND),
+               "E_SCHEMA_UNBOUND") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_REQUIRED_SECTION_MISSING),
+               "E_REQUIRED_SECTION_MISSING") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_ASSET_PATH_ESCAPE),
                "E_ASSET_PATH_ESCAPE") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_MISSING_MANIFEST),
+               "E_MISSING_MANIFEST") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_MANIFEST_HASH_MISMATCH),
+               "E_MANIFEST_HASH_MISMATCH") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_MANIFEST_MISSING_FILE),
+               "E_MANIFEST_MISSING_FILE") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_MANIFEST_EXTRA_FILE),
+               "E_MANIFEST_EXTRA_FILE") == 0);
+  CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_ALGO_NOT_ALLOWED),
+               "E_ALGO_NOT_ALLOWED") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_UNIMPLEMENTED),
                "E_UNIMPLEMENTED") == 0);
   CHECK(strcmp(mcdf_micro_status_str(MCDF_MICRO_E_DISABLED), "E_DISABLED") == 0);
@@ -778,6 +1364,12 @@ int main(void) {
   test_arena();
   test_yaml_shapes();
   test_manifest_shapes();
+  test_schema();
+  test_anchors();
+  test_sealed();
+  test_validate_core();
+  test_manifest_membership();
+  test_integrity();
   test_path_safety();
   test_reporting();
 

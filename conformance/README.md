@@ -70,6 +70,27 @@ not decline. If you support the directory form too, score it as well — but an
 implementation that passes only `dir` is not conforming, since no one can hand
 it a file.
 
+### If you stop partway up the ladder
+
+Most implementations will. Exit non-zero with **`E_UNIMPLEMENTED`** in the
+output for a profile you did not evaluate, and the runner scores that vector
+`N/A` and counts it separately:
+
+```
+  PASS  minimal
+  N/A   signed - signed not implemented
+  ...
+passed 7, failed 0, not implemented 12
+```
+
+The count is always printed, because "0 failed" means something different when
+a third of the vectors were never evaluated. What this buys you is a clean
+score for the profiles you *do* claim, and nothing else — every other answer is
+scored normally, so declining a profile is only ever a statement about
+coverage. What it does not buy you is silence: reporting a profile as valid
+without running its checks is the one behaviour `errors.md` rules out
+completely.
+
 Regenerating the packed vectors after editing a vector directory:
 
 ```sh

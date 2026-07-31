@@ -94,12 +94,22 @@ not normative — no `invalid/` vector may require it, and no implementation is
 obliged to emit it — but the kit reserves the name so a scoring harness can tell
 *absent* from *wrong*.
 
+`run.sh` and `run.ps1` act on it: a vector whose run exits non-zero with
+`E_UNIMPLEMENTED` in its output is recorded `N/A` rather than passed or failed,
+and the summary line grows a `not implemented` count. The count is always
+printed — a score of "0 failed" means something different when a third of the
+vectors were never evaluated. Everything else the implementation says is scored
+normally, so declining a profile buys a clean score for the profiles it does
+claim and nothing more.
+
 Observed first in `mcdf-ts`, which reported `E_UNIMPLEMENTED` for Render while a
 canonical render had to be byte-identical to the reference output and there was
-nothing published to prove that against. Both halves are now closed — spec §10.4
-fixes the bytes and `canonical/render` publishes them — so `mcdf-ts` claims all
-five profiles and no implementation currently emits this code. The reservation
-stands: the next implementation to stop somewhere has a way to say so.
+nothing published to prove that against. Both halves of that are closed — spec
+§10.4 fixes the bytes and `canonical/render` publishes them — and `mcdf-ts`
+claims all five profiles. The code is now emitted by `mcdf_micro`, the C reader,
+which implements Core and Integrity and will never implement the rest: it holds
+no private keys and never decrypts, so Signed above verification and Encrypted
+are not gaps it intends to close. That is the case the reservation was made for.
 
 ## Manifest membership (normative)
 
