@@ -10,18 +10,26 @@
 #
 # The host matrix is where the real testing happens. An IDF build can only
 # prove that it compiles.
+#
+# Every path below is anchored to MCDF_MICRO_ROOT rather than to
+# CMAKE_CURRENT_SOURCE_DIR, because this file is not always the one CMake is
+# processing: under ESP-IDF it is include()d from a component directory that
+# exists to give the component its name (see port/esp-idf/).
+# CMAKE_CURRENT_LIST_DIR is the directory of the file being read, so it is this
+# directory in both cases and the include has nothing to pass in.
+set(MCDF_MICRO_ROOT ${CMAKE_CURRENT_LIST_DIR})
 
 # The files that decide whether a document is valid. They are listed separately
 # from the rest because of the guard below: what they must never do is depend on
 # a feature gate, and gated sources get appended to MCDF_MICRO_SOURCES.
 set(MCDF_MICRO_UNGATED_SOURCES
-  src/ustar.c
-  src/index.c
-  src/manifest.c
-  src/yaml_min.c
-  src/schema.c
-  src/anchors.c
-  src/validate.c)
+  ${MCDF_MICRO_ROOT}/src/ustar.c
+  ${MCDF_MICRO_ROOT}/src/index.c
+  ${MCDF_MICRO_ROOT}/src/manifest.c
+  ${MCDF_MICRO_ROOT}/src/yaml_min.c
+  ${MCDF_MICRO_ROOT}/src/schema.c
+  ${MCDF_MICRO_ROOT}/src/anchors.c
+  ${MCDF_MICRO_ROOT}/src/validate.c)
 
 # The gated ones. Each keeps its stubs in the same translation unit, so a
 # disabled entry point still links and returns E_DISABLED; what a gate removes
@@ -29,11 +37,11 @@ set(MCDF_MICRO_UNGATED_SOURCES
 # added to the source list only when the gate is on.
 set(MCDF_MICRO_SOURCES
   ${MCDF_MICRO_UNGATED_SOURCES}
-  src/sha256.c
-  src/verify.c
-  render/render.c)
+  ${MCDF_MICRO_ROOT}/src/sha256.c
+  ${MCDF_MICRO_ROOT}/src/verify.c
+  ${MCDF_MICRO_ROOT}/render/render.c)
 
-set(MCDF_MICRO_MD4C ${CMAKE_CURRENT_SOURCE_DIR}/render/md4c/md4c.c)
+set(MCDF_MICRO_MD4C ${MCDF_MICRO_ROOT}/render/md4c/md4c.c)
 
 # ---- structural guard: format decisions must not depend on a gate ------------
 #
@@ -50,12 +58,14 @@ set(MCDF_MICRO_MD4C ${CMAKE_CURRENT_SOURCE_DIR}/render/md4c/md4c.c)
 # in fact encouraged - it is the include that couples them.
 foreach(mcdf_micro_guarded
         ${MCDF_MICRO_UNGATED_SOURCES}
-        src/internal.h
-        include/mcdf_micro/mcdf_micro.h)
-  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${mcdf_micro_guarded}" mcdf_micro_text)
+        ${MCDF_MICRO_ROOT}/src/internal.h
+        ${MCDF_MICRO_ROOT}/include/mcdf_micro/mcdf_micro.h)
+  file(READ "${mcdf_micro_guarded}" mcdf_micro_text)
   if(mcdf_micro_text MATCHES "#[ \t]*include[ \t]*[<\"]md4c")
+    file(RELATIVE_PATH mcdf_micro_guarded_rel
+         "${MCDF_MICRO_ROOT}" "${mcdf_micro_guarded}")
     message(FATAL_ERROR
-      "mcdf_micro: ${mcdf_micro_guarded} includes md4c.\n"
+      "mcdf_micro: ${mcdf_micro_guarded_rel} includes md4c.\n"
       "These files decide whether a document is valid, and that decision must "
       "be identical in every feature-gate configuration (see the anchor scanner "
       "in src/anchors.c). Routing it through a parser that only exists when "
@@ -89,20 +99,58 @@ option(MCDF_MICRO_ENABLE_INTEGRITY
 option(MCDF_MICRO_ENABLE_RENDER
        "md4c and the block/span event stream (Render profile)" ON)
 
+# Warnings as errors, off by default and on in CI. It is deliberately not the
+# default: a consumer's toolchain is not ours, and a compiler a year newer than
+# this file inventing a new warning must not break their build. What it must do
+# is break ours, which is what the option is for.
+option(MCDF_MICRO_WERROR "Treat warnings in mcdf_micro's own sources as errors" OFF)
+
+# The warning set, in one place, because the ESP-IDF branch and the host build
+# below have to agree about what "clean" means. -Wpedantic is in it: the library
+# is C99 with no vendor headers anywhere, so there is nothing here entitled to a
+# GNU extension.
+if(MSVC)
+  set(MCDF_MICRO_WARNINGS /W4)
+  set(MCDF_MICRO_VENDOR_QUIET /W0)
+  set(MCDF_MICRO_WERROR_FLAG /WX)
+else()
+  set(MCDF_MICRO_WARNINGS -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  set(MCDF_MICRO_VENDOR_QUIET -w)
+  set(MCDF_MICRO_WERROR_FLAG -Werror)
+endif()
+
 if(ESP_PLATFORM)
   if(MCDF_MICRO_ENABLE_RENDER)
     list(APPEND MCDF_MICRO_SOURCES ${MCDF_MICRO_MD4C})
   endif()
   idf_component_register(
     SRCS ${MCDF_MICRO_SOURCES}
-    INCLUDE_DIRS include
-    PRIV_INCLUDE_DIRS src render/md4c)
+    INCLUDE_DIRS ${MCDF_MICRO_ROOT}/include
+    PRIV_INCLUDE_DIRS ${MCDF_MICRO_ROOT}/src ${MCDF_MICRO_ROOT}/render/md4c)
   if(MCDF_MICRO_ENABLE_INTEGRITY)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MCDF_MICRO_ENABLE_INTEGRITY)
   endif()
   if(MCDF_MICRO_ENABLE_RENDER)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MCDF_MICRO_ENABLE_RENDER)
   endif()
+
+  # IDF's own warning set is not ours and is not enough: it is tuned for code
+  # that may use GNU extensions freely, and it leaves -Wconversion off, which is
+  # the one that matters most here - this library does arithmetic on sizes and
+  # offsets, and a 32-bit size_t is where a silent narrowing becomes a wrong
+  # read rather than a wasted bit.
+  target_compile_options(${COMPONENT_LIB} PRIVATE ${MCDF_MICRO_WARNINGS})
+  if(MCDF_MICRO_WERROR)
+    target_compile_options(${COMPONENT_LIB} PRIVATE ${MCDF_MICRO_WERROR_FLAG})
+  endif()
+
+  # md4c is third-party and unmodified (render/md4c/README.md says it stays that
+  # way), so our warning set does not apply to it and -Werror must not reach it:
+  # warnings we have forbidden ourselves to act on are noise, and noise is what
+  # gets a real warning ignored. Source properties are appended after the
+  # target's, so -w wins for this one file.
+  set_source_files_properties(${MCDF_MICRO_MD4C}
+    PROPERTIES COMPILE_OPTIONS "${MCDF_MICRO_VENDOR_QUIET}")
   return()
 endif()
 
@@ -117,13 +165,8 @@ endif()
 # that way - so it is compiled without our warning set. Warnings we have
 # forbidden ourselves to act on are noise, and noise is what gets a real
 # warning ignored. Ours still apply to every file we wrote.
-if(MSVC)
-  set(MCDF_MICRO_VENDOR_QUIET /W0)
-else()
-  set(MCDF_MICRO_VENDOR_QUIET -w)
-endif()
 set_source_files_properties(${MCDF_MICRO_MD4C}
-  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  DIRECTORY ${MCDF_MICRO_ROOT}
   PROPERTIES COMPILE_OPTIONS "${MCDF_MICRO_VENDOR_QUIET}")
 
 # One library, one configuration. Called once for the target consumers link,
@@ -136,10 +179,10 @@ function(mcdf_micro_add_library target integrity render)
 
   add_library(${target} STATIC ${sources})
   target_include_directories(${target}
-    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PUBLIC $<BUILD_INTERFACE:${MCDF_MICRO_ROOT}/include>
            $<INSTALL_INTERFACE:include>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/render/md4c)
+    PRIVATE ${MCDF_MICRO_ROOT}/src
+            ${MCDF_MICRO_ROOT}/render/md4c)
   set_target_properties(${target} PROPERTIES
     C_STANDARD 99
     C_STANDARD_REQUIRED ON
@@ -150,11 +193,9 @@ function(mcdf_micro_add_library target integrity render)
   if(render)
     target_compile_definitions(${target} PUBLIC MCDF_MICRO_ENABLE_RENDER)
   endif()
-  if(MSVC)
-    target_compile_options(${target} PRIVATE /W4)
-  else()
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic
-                                             -Wconversion -Wshadow)
+  target_compile_options(${target} PRIVATE ${MCDF_MICRO_WARNINGS})
+  if(MCDF_MICRO_WERROR)
+    target_compile_options(${target} PRIVATE ${MCDF_MICRO_WERROR_FLAG})
   endif()
 endfunction()
 
@@ -173,7 +214,7 @@ endif()
 option(MCDF_MICRO_BUILD_TESTS "Build the mcdf_micro host tests"
        ${MCDF_MICRO_TESTS_DEFAULT})
 
-get_filename_component(MCDF_MICRO_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+get_filename_component(MCDF_MICRO_REPO_ROOT "${MCDF_MICRO_ROOT}/.." ABSOLUTE)
 
 # Everything a configuration is worth testing with: the C99 suite, the C++23
 # header gate, and the CLI the conformance kit scores. Built per configuration,
@@ -212,15 +253,10 @@ function(mcdf_micro_add_harness lib suffix)
   add_executable(mcdf-micro-cli${suffix} host/mcdf_micro_cli.c host/jcs.c)
   target_link_libraries(mcdf-micro-cli${suffix} PRIVATE ${lib})
   target_include_directories(mcdf-micro-cli${suffix} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/host)
+    ${MCDF_MICRO_ROOT}/host)
   set_target_properties(mcdf-micro-cli${suffix} PROPERTIES
     C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-  if(MSVC)
-    target_compile_options(mcdf-micro-cli${suffix} PRIVATE /W4)
-  else()
-    target_compile_options(mcdf-micro-cli${suffix} PRIVATE
-      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-  endif()
+  target_compile_options(mcdf-micro-cli${suffix} PRIVATE ${MCDF_MICRO_WARNINGS})
 endfunction()
 
 if(MCDF_MICRO_BUILD_TESTS AND
