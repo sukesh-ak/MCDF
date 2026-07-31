@@ -24,12 +24,12 @@ jobs:
           - { os: macos-latest,   name: macos-arm64 }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -98,7 +98,7 @@ jobs:
           "$bin" --version
           "$bin" --help >/dev/null
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mcdf-${{ matrix.name }}
           path: dist/*
@@ -119,12 +119,12 @@ jobs:
           - { os: macos-latest,   name: macos-arm64 }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-studio-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -191,7 +191,7 @@ jobs:
           rm -rf "$name"
           ls -l
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mcdf-studio-${{ matrix.name }}
           path: dist/*
@@ -228,12 +228,12 @@ jobs:
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: env.NPM_TOKEN != ''
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: env.NPM_TOKEN != ''
         with:
           node-version: 22
@@ -277,11 +277,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: staged
           merge-multiple: true

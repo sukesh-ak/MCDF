@@ -27,11 +27,11 @@ jobs:
           - { os: macos-latest,   name: macos }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # vcpkg builds OpenSSL from source, so cache the installed tree.
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -68,10 +68,10 @@ jobs:
           - { os: macos-latest,   name: macos }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-studio-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -107,7 +107,7 @@ jobs:
         run: xvfb-run -a ./build/apps/studio/mcdf-studio --smoke examples/showcase.mcdf
 
       - name: Upload Studio binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mcdf-studio-${{ matrix.name }}
           path: |
@@ -122,10 +122,10 @@ jobs:
     name: fuzz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-fuzz-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -175,7 +175,7 @@ jobs:
     name: docker
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image (compiles, runs tests, emits the CLI)
         run: docker build -t mcdf:ci .
       - name: Smoke-test the CLI
