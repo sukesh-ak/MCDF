@@ -1,0 +1,6 @@
+{
+  "description": "schema.yaml binds a required section whose only {#terms} anchor sits on a heading inside a block quote, and an optional one whose anchor is inside a list item. Spec 4.2 binds a section only to a TOP-LEVEL heading: a nested heading is a heading quoted within another block, not part of the document's skeleton, and admitting it would put binding out of reach of any implementation without a full CommonMark parser. So neither binds, and the expected verdict names the sections rather than the nesting - to a validator those headings are simply absent.",
+  "profile": "core",
+  "expect": "fail",
+  "error": "E_REQUIRED_SECTION_MISSING"
+}

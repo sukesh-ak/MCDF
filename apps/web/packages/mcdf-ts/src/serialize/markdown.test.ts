@@ -29,43 +29,70 @@ describe('parseHeadings', () => {
   it('reads ATX headings with levels and anchors', () => {
     const headings = parseHeadings('# One {#a}\n\ntext\n\n### Three {#b}\n');
     expect(headings).toEqual([
-      { level: 1, text: 'One', id: 'a', line: 1 },
-      { level: 3, text: 'Three', id: 'b', line: 5 },
+      { level: 1, text: 'One', id: 'a', line: 1, topLevel: true },
+      { level: 3, text: 'Three', id: 'b', line: 5, topLevel: true },
     ]);
   });
 
   it('handles a closing sequence without inflating the level', () => {
-    expect(parseHeadings('## Two ##\n')).toEqual([{ level: 2, text: 'Two', id: '', line: 1 }]);
+    expect(parseHeadings('## Two ##\n')).toEqual([
+      { level: 2, text: 'Two', id: '', line: 1, topLevel: true },
+    ]);
+  });
+
+  // Spec §4.2: only a top-level heading binds a schema section. The nested ones
+  // are still returned — the renderer needs every heading, and matches them to
+  // <hN> tags by position, so dropping one would shift every id onto the wrong
+  // heading (spec §10.4).
+  it('marks headings nested in a block quote or list item', () => {
+    const md = [
+      '# Top {#top}',
+      '',
+      '> ## Quoted {#quoted}',
+      '',
+      '- ### In a list item {#item}',
+      '',
+      '#### Back at the top {#back}',
+      '',
+    ].join('\n');
+    expect(parseHeadings(md).map((h) => [h.id, h.topLevel])).toEqual([
+      ['top', true],
+      ['quoted', false],
+      ['item', false],
+      // The depth counter has to unwind, or every heading after a container
+      // looks nested too.
+      ['back', true],
+    ]);
   });
 
   it('reads setext headings', () => {
     expect(parseHeadings('Title {#t}\n=====\n\nSub\n---\n')).toEqual([
-      { level: 1, text: 'Title', id: 't', line: 1 },
-      { level: 2, text: 'Sub', id: '', line: 4 },
+      { level: 1, text: 'Title', id: 't', line: 1, topLevel: true },
+      { level: 2, text: 'Sub', id: '', line: 4, topLevel: true },
     ]);
   });
 
   it('strips inline markup from heading text, as md4c does', () => {
     expect(parseHeadings('# A *bold* `run` {#x}\n')).toEqual([
-      { level: 1, text: 'A bold run', id: 'x', line: 1 },
+      { level: 1, text: 'A bold run', id: 'x', line: 1, topLevel: true },
     ]);
   });
 
   it('keeps link and image URLs out of the heading text', () => {
     expect(parseHeadings('# [Overview](https://example.com) {#overview}\n')).toEqual([
-      { level: 1, text: 'Overview', id: 'overview', line: 1 },
+      { level: 1, text: 'Overview', id: 'overview', line: 1, topLevel: true },
     ]);
     expect(parseHeadings('# See [it][ref] {#see}\n\n[ref]: https://example.com\n')).toEqual([
-      { level: 1, text: 'See it', id: 'see', line: 1 },
+      { level: 1, text: 'See it', id: 'see', line: 1, topLevel: true },
     ]);
     expect(parseHeadings('# ![logo](assets/logo.png "a title") Brand {#brand}\n')).toEqual([
-      { level: 1, text: 'logo Brand', id: 'brand', line: 1 },
+      { level: 1, text: 'logo Brand', id: 'brand', line: 1, topLevel: true },
     ]);
   });
 
   it('finds anchors in a document that opens with an image', () => {
     const md = '![w1](assets/w1-1.jpg "width=600 align=center")\n\n# Overview {#overview}\n';
-    expect(parseHeadings(md)).toEqual([{ level: 1, text: 'Overview', id: 'overview', line: 3 }]);
+    expect(parseHeadings(md)).toEqual([{ level: 1, text: 'Overview', id: 'overview', line: 3, topLevel: true }]);
   });
 
   it('ignores hashes inside fenced code blocks', () => {
@@ -91,6 +118,7 @@ describe('setHeadingAnchor', () => {
       text: 'Status',
       id: 'status',
       line: 5,
+      topLevel: true,
     });
   });
 
@@ -108,7 +136,7 @@ describe('setHeadingAnchor', () => {
     // correctly either way.)
     const out = setHeadingAnchor('## Two ##\n', 1, 'two');
     expect(out).toBe('## Two {#two}\n');
-    expect(parseHeadings(out)).toEqual([{ level: 2, text: 'Two', id: 'two', line: 1 }]);
+    expect(parseHeadings(out)).toEqual([{ level: 2, text: 'Two', id: 'two', line: 1, topLevel: true }]);
     expect(renderHtml(out)).toContain('<h2 id="two">Two</h2>');
   });
 
@@ -183,7 +211,7 @@ describe('heading anchors', () => {
     // does not end in `}`, so the anchor stayed visible while the schema bound it.
     expect(renderHtml('### Deep {#d} ###\n')).toBe('<h3 id="d">Deep</h3>\n');
     expect(parseHeadings('### Deep {#d} ###\n')).toEqual([
-      { level: 3, text: 'Deep', id: 'd', line: 1 },
+      { level: 3, text: 'Deep', id: 'd', line: 1, topLevel: true },
     ]);
   });
 

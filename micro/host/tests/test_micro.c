@@ -939,6 +939,83 @@ static void test_anchors(void) {
   CHECK_ST(mcdf_micro_has_anchor(r, "over"), MCDF_MICRO_E_NOT_FOUND);
   CHECK_ST(mcdf_micro_has_anchor(r, ""), MCDF_MICRO_E_NOT_FOUND);
 
+  /* A setext heading whose text opens with a character that also opens a
+   * block. Excluding these by first character alone lost real headings, and
+   * under spec 4.2 a lost heading means failing a document that another
+   * implementation accepts. */
+  tar_reset();
+  tar_add("content.md",
+          "*Emphasised Title* {#emph}\n"
+          "==========================\n"
+          "\n"
+          "`code` in the title {#tick}\n"
+          "---------------------------\n"
+          "\n"
+          "=leading equals {#eq}\n"
+          "---------------------\n"
+          "\n"
+          "-not-a-bullet {#dash}\n"
+          "---------------------\n"
+          "\n"
+          /* No space after the dot, so this is prose, not a list marker. */
+          "7.not-an-ordered-marker {#seven-dot}\n"
+          "------------------------------------\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "emph"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "tick"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "eq"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "dash"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "seven-dot"), MCDF_MICRO_OK);
+
+  /* ...but a line that really does open another block is still not setext
+   * text, so the underline below it forms no heading. */
+  tar_reset();
+  tar_add("content.md",
+          "- a bullet {#bullet}\n"
+          "--------------------\n"
+          "\n"
+          "> quoted {#quoted}\n"
+          "------------------\n"
+          "\n"
+          "# atx already {#atx}\n"
+          "--------------------\n"
+          "\n"
+          "```\n"
+          "fenced {#fenced}\n"
+          "----------------\n"
+          "```\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "bullet"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "quoted"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "fenced"), MCDF_MICRO_E_NOT_FOUND);
+  /* The ATX heading binds on its own line; the dashes below it are a thematic
+   * break, not a second heading over the same text. */
+  CHECK_ST(mcdf_micro_has_anchor(r, "atx"), MCDF_MICRO_OK);
+
+  /* Spec 4.2: only a top-level heading binds. A nested one is a heading quoted
+   * inside another block, and admitting it would need a CommonMark parser -
+   * which is the whole reason the rule says top level. */
+  tar_reset();
+  tar_add("content.md",
+          "# Overview {#overview}\n"
+          "\n"
+          "> ## Quoted {#quoted}\n"
+          "\n"
+          "- ### In a list item {#item}\n"
+          "\n"
+          "#### Back at the top {#back}\n");
+  tar_end();
+  tar_source(&src, &mem);
+  CHECK_ST(mcdf_micro_open(&src, g_arena, sizeof g_arena, &r), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "overview"), MCDF_MICRO_OK);
+  CHECK_ST(mcdf_micro_has_anchor(r, "quoted"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "item"), MCDF_MICRO_E_NOT_FOUND);
+  CHECK_ST(mcdf_micro_has_anchor(r, "back"), MCDF_MICRO_OK);
+
   /* CRLF, because a document authored on Windows is the same document. */
   tar_reset();
   tar_add("content.md",

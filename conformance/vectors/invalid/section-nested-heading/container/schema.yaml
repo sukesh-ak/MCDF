@@ -1,0 +1,9 @@
+document_type: contract
+sections:
+  - id: overview
+    title: Overview
+  - id: terms
+    title: Terms and Conditions
+    required: true
+  - id: appendix
+    title: Appendix

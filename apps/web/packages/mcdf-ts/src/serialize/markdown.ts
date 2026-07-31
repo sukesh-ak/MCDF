@@ -57,6 +57,10 @@ export function parseHeadings(markdown: string): Heading[] {
   // yield "Overview", not "Overviewx", so collection pauses inside the resource
   // and reference parts the way md4c's text callback never sees them at all.
   let inDestination = 0;
+  // Block quotes, list items and table cells. A heading inside one of them is
+  // still a heading and still renders, but it does not bind a schema section
+  // (spec §4.2) — so the depth is recorded rather than the heading dropped.
+  let containerDepth = 0;
 
   const open = (token: unknown): void => {
     level = 0;
@@ -70,9 +74,17 @@ export function parseHeadings(markdown: string): Heading[] {
   const close = (): void => {
     if (parts === null) return;
     const { text, id } = splitHeadingId(parts.join(''));
-    headings.push({ level, text, id, line });
+    headings.push({ level, text, id, line, topLevel: containerDepth === 0 });
     parts = null;
     inDestination = 0;
+  };
+
+  const enterContainer = (): void => {
+    containerDepth++;
+  };
+
+  const exitContainer = (): void => {
+    if (containerDepth > 0) containerDepth--;
   };
 
   const collect: Handle = function (token) {
@@ -93,10 +105,21 @@ export function parseHeadings(markdown: string): Heading[] {
       setextHeading: open,
       resource: enterDestination,
       reference: enterDestination,
+      // The container tokens micromark actually emits. There is no `listItem`
+      // token — items are `listItemPrefix` inside the list — and no `tableCell`,
+      // because CommonMark has no tables and MCDF does not add them (spec
+      // §10.4). Tracking the list rather than the item is enough: a heading in
+      // any item is inside the list.
+      blockQuote: enterContainer,
+      listOrdered: enterContainer,
+      listUnordered: enterContainer,
     },
     exit: {
       resource: exitDestination,
       reference: exitDestination,
+      blockQuote: exitContainer,
+      listOrdered: exitContainer,
+      listUnordered: exitContainer,
       atxHeadingSequence(token) {
         // Fires for both the opening and the closing `###` run; only the first
         // carries the level.

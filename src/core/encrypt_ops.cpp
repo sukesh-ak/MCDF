@@ -35,9 +35,13 @@ Result<std::vector<std::string>> bound_sections(std::string_view schema_yaml,
   auto headings = parse_headings(content);
   if (!headings) return std::unexpected(headings.error());
 
+  // Top-level headings only, exactly as check_core binds them (spec 4.2).
+  // These two must not drift: an encryptor that attested a nested anchor would
+  // record a binding no validator would accept, and the document would fail the
+  // moment it was sealed.
   std::set<std::string> anchors;
   for (const auto& h : *headings) {
-    if (!h.id.empty()) anchors.insert(h.id);
+    if (h.top_level && !h.id.empty()) anchors.insert(h.id);
   }
 
   std::vector<std::string> bound;

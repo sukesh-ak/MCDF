@@ -58,7 +58,16 @@ function rebuildManifest(container: WritableContainer): void {
  */
 function boundSections(schemaYaml: string, content: string): string[] {
   const schema = parseSchemaYaml(schemaYaml);
-  const anchors = new Set(parseHeadings(content).map((h) => h.id).filter((id) => id !== ''));
+  // Top-level headings only, exactly as validate binds them (spec §4.2). These
+  // two must not drift: an encryptor that attested a nested anchor would record
+  // a binding no validator would accept, and the document would fail the moment
+  // it was sealed.
+  const anchors = new Set(
+    parseHeadings(content)
+      .filter((h) => h.topLevel)
+      .map((h) => h.id)
+      .filter((id) => id !== ''),
+  );
   return schema.sections.filter((s) => s.id !== '' && anchors.has(s.id)).map((s) => s.id);
 }
 

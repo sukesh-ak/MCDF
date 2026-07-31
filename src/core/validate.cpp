@@ -51,8 +51,12 @@ void check_core(const Container& c, const Document& d, ValidationReport& r) {
     bound.insert(policy->structure.bound_sections.begin(),
                  policy->structure.bound_sections.end());
   } else {
+    // Top-level headings only (spec 4.2). An anchor inside a block quote, list
+    // item or table cell is a heading quoted within something else, not part of
+    // the document's skeleton - and admitting it would put binding out of reach
+    // of any implementation without a full CommonMark parser.
     for (const auto& h : d.headings) {
-      if (!h.id.empty()) bound.insert(h.id);
+      if (h.top_level && !h.id.empty()) bound.insert(h.id);
     }
   }
 

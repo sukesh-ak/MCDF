@@ -168,6 +168,26 @@ Purpose:
 - Supports validation and AI reasoning
 - Binds machine structure to content: every section `id` MUST correspond to a heading identifier in `content.md`, and validators MUST reject documents missing a section marked `required: true`. When `content.md` is sealed (§5.2) this binding is evaluated against the structure attestation instead of the headings — see §5.2.1
 
+**A binding heading MUST be at the top level of `content.md`** (normative). An
+anchor carried by a heading inside a block quote, a list item, or a table cell
+does **not** bind a section: to a validator that heading is absent, and a
+section that has no other heading is missing.
+
+The rule exists because binding is a *structural* claim and a nested heading is
+not structure — it is a heading quoted inside something else, and a document's
+skeleton cannot be assembled from headings that belong to other blocks. It is
+also what lets a constrained implementation participate at all: locating
+top-level headings is a line scan, while locating nested ones requires tracking
+container blocks, lazy continuation and list-item content indentation — a
+CommonMark implementation, which on the smallest targets costs several times
+what the rest of a reader does. Requiring that of everything that wants to check
+a `required: true` section would price the Core profile out of exactly the
+devices §10.1 promises it to.
+
+This constrains *binding* only. It does not change what is a heading: a nested
+heading is still a heading, still renders as one, and still carries its anchor
+as an `id` in the canonical render (§10.4).
+
 Fields:
 
 | Field | Requirement | Meaning |
@@ -561,7 +581,15 @@ Determine which headings carry anchors **from the parse**, never by scanning the
 source for lines beginning with `#`. A line scan cannot distinguish a heading
 from a line inside a fenced code block, and it misses every heading that does not
 begin its line — any heading inside a blockquote or list item — and every setext
-heading.
+heading. *Every* heading is rendered here, nested ones included, so a renderer
+needs all of them and a parse is the only way to have them all.
+
+This is a rule for **rendering**, and it is not the rule for **binding**. §4.2
+binds a schema section only to a *top-level* heading, which a line scan can find,
+so an implementation may reach the Core profile without a CommonMark parser and
+still agree with every other implementation about which documents are valid. An
+implementation that renders needs the parse regardless; one that only validates
+does not.
 
 **Raw HTML is text, not markup.** `<div>x</div>` in `content.md` is neither
 emitted nor recognised as an HTML block: those bytes are ordinary characters that

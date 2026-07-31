@@ -47,6 +47,17 @@ heading anchor in `content.md`:
 A section id with no matching heading → `E_SCHEMA_UNBOUND`, or
 `E_REQUIRED_SECTION_MISSING` when `required: true`.
 
+**The heading must be top-level** (§4.2). An anchor inside a block quote, list
+item or table cell does not bind — for binding, that heading is not there. This
+is deliberately generous to you: finding top-level headings is a line scan, so
+you can reach Core with no CommonMark parser at all and still agree with every
+other implementation. Watch two things if you scan lines rather than parse:
+skip fenced and indented code blocks, and remember that setext headings
+(`Title {#id}` underlined with `===` or `---`) are headings too.
+
+If you render, you need a real parse anyway — and there *every* heading counts,
+nested ones included (§10.4).
+
 ## Core: modify a document
 
 Edit the files. That's it. If the container has a manifest, rebuild it

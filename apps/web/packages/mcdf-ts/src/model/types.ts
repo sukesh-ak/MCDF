@@ -48,6 +48,15 @@ export interface Heading {
   id: string;
   /** 1-based line in `content.md` where the heading starts. */
   line: number;
+  /**
+   * False when the heading sits inside a block quote, list item or table cell.
+   *
+   * Only a top-level heading binds a `schema.yaml` section (spec §4.2); every
+   * heading, nested or not, still renders and still carries its anchor as an
+   * `id` (spec §10.4). So this filters binding and nothing else — the list
+   * itself stays complete.
+   */
+  topLevel: boolean;
 }
 
 /** An in-memory view of a document loaded from a container. */

@@ -163,15 +163,61 @@ static int mm_setext_level(const struct mm_lineinfo *l) {
   return ch == '=' ? 1 : 2;
 }
 
-/* Could this line be the text of a setext heading? Conservative on purpose:
- * anything that opens a block-level construct is excluded, so the scanner
- * would rather miss an exotic heading than invent one. */
+/* Could this line be the text of a setext heading? Only a paragraph line can
+ * be, so what has to be excluded is exactly the lines that open some other
+ * block - and no more than those. Excluding by first character alone was too
+ * blunt: `*Terms* {#terms}` and `` `id` matters {#x} `` are paragraphs, and
+ * calling them non-candidates lost real headings, which under spec 4.2 means
+ * failing a document another implementation accepts. */
 static int mm_setext_candidate(const struct mm_lineinfo *l) {
+  size_t i;
   char ch;
+
   if (l->blank || l->columns > 3 || l->indent >= l->head_len) return 0;
   ch = l->head[l->indent];
-  return ch != '#' && ch != '>' && ch != '-' && ch != '*' && ch != '+' &&
-         ch != '=' && ch != '`' && ch != '~';
+
+  if (ch == '>') return 0; /* block quote */
+  /* A bullet needs whitespace (or end of line) after it; `*emphasis*` and
+   * `-dash` are text. */
+  if (ch == '-' || ch == '+' || ch == '*') {
+    const size_t next = l->indent + 1u;
+    if (next >= l->len) return 0;
+    if (next < l->head_len && mm_is_space(l->head[next])) return 0;
+    return 1;
+  }
+  /* An ordered-list marker: digits then '.' or ')' then whitespace. */
+  if (ch >= '0' && ch <= '9') {
+    for (i = l->indent; i < l->head_len && l->head[i] >= '0' && l->head[i] <= '9';
+         ++i) {
+      /* scan the run */
+    }
+    if (i < l->head_len && (l->head[i] == '.' || l->head[i] == ')')) {
+      const size_t next = i + 1u;
+      if (next >= l->len) return 0;
+      if (next < l->head_len && mm_is_space(l->head[next])) return 0;
+    }
+    return 1;
+  }
+  /* A fence needs three of them; one or two backticks open a code span, which
+   * is ordinary text. mm_fence() has already consumed real fences by the time
+   * this runs, so this only has to avoid claiming one. */
+  if (ch == '`' || ch == '~') {
+    size_t run = 0;
+    while (l->indent + run < l->head_len && l->head[l->indent + run] == ch) ++run;
+    return run < 3;
+  }
+  /* '#' is an ATX heading only when whitespace follows; `#tag` is text. */
+  if (ch == '#') {
+    size_t run = 0;
+    while (l->indent + run < l->head_len && l->head[l->indent + run] == '#') ++run;
+    if (run > 6) return 1; /* seven hashes is not a heading, it is a paragraph */
+    if (l->indent + run >= l->len) return 0;
+    if (l->indent + run < l->head_len && mm_is_space(l->head[l->indent + run])) {
+      return 0;
+    }
+    return 1;
+  }
+  return 1;
 }
 
 /* Extracts the trailing `{#id}` from a heading's text. Returns the id length,

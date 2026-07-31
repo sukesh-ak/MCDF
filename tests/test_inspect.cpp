@@ -32,6 +32,34 @@ TEST_CASE("heading without an id has empty id") {
   CHECK((*h)[0].id.empty());
 }
 
+// Spec 4.2: only a top-level heading binds a schema section. The nested ones
+// are still parsed and still reported - the renderer needs every heading, and
+// matches them to <hN> tags by position, so dropping one here would shift every
+// id onto the wrong heading (spec 10.4).
+TEST_CASE("parse_headings marks headings nested in a container") {
+  auto h = mcdf::parse_headings(
+      "# Top {#top}\n"
+      "\n"
+      "> ## Quoted {#quoted}\n"
+      "\n"
+      "- ### In a list item {#item}\n"
+      "\n"
+      "#### Back at the top {#back}\n");
+  REQUIRE(h.has_value());
+  REQUIRE(h->size() == 4);
+
+  CHECK((*h)[0].id == "top");
+  CHECK((*h)[0].top_level);
+  CHECK((*h)[1].id == "quoted");
+  CHECK_FALSE((*h)[1].top_level);
+  CHECK((*h)[2].id == "item");
+  CHECK_FALSE((*h)[2].top_level);
+  // The depth counter has to unwind, or every heading after a container looks
+  // nested too.
+  CHECK((*h)[3].id == "back");
+  CHECK((*h)[3].top_level);
+}
+
 TEST_CASE("DirectoryContainer rejects path escapes") {
   auto c = mcdf::DirectoryContainer::open(example_path());
   REQUIRE(c.has_value());

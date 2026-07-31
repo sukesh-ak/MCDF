@@ -83,7 +83,13 @@ function checkCore(container: Container, doc: McdfDocument, issues: ValidationIs
     }
     bound = new Set(policy.structure.bound_sections);
   } else {
-    bound = new Set(doc.headings.map((h) => h.id).filter((id) => id !== ''));
+    // Top-level headings only (spec §4.2). An anchor inside a block quote or
+    // list item is a heading quoted within something else, not part of the
+    // document's skeleton — and admitting it would put binding out of reach of
+    // any implementation without a full CommonMark parser.
+    bound = new Set(
+      doc.headings.filter((h) => h.topLevel).map((h) => h.id).filter((id) => id !== ''),
+    );
   }
 
   const where = contentSealed ? 'in the sealed content' : 'in content';

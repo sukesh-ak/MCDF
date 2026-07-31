@@ -13,8 +13,18 @@ struct HeadingCtx {
   std::vector<Heading> headings;
   bool in_heading = false;
   int level = 0;
+  int container_depth = 0;  // block quotes, list items and table cells
   std::string buf;
 };
+
+// The blocks that make a heading inside them "not top level" for the purposes
+// of schema binding (spec 4.2). MD_BLOCK_UL/OL are not counted: the list itself
+// contains no text, only its items do, and counting both would be double
+// counting rather than wrong.
+bool is_container(MD_BLOCKTYPE type) {
+  return type == MD_BLOCK_QUOTE || type == MD_BLOCK_LI ||
+         type == MD_BLOCK_TD || type == MD_BLOCK_TH;
+}
 
 std::string trim(std::string_view s) {
   std::size_t b = 0, e = s.size();
@@ -25,6 +35,7 @@ std::string trim(std::string_view s) {
 
 int on_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
   auto* c = static_cast<HeadingCtx*>(userdata);
+  if (is_container(type)) ++c->container_depth;
   if (type == MD_BLOCK_H) {
     c->in_heading = true;
     c->level = static_cast<int>(static_cast<MD_BLOCK_H_DETAIL*>(detail)->level);
@@ -39,9 +50,11 @@ int on_leave_block(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
     c->in_heading = false;
     Heading h;
     h.level = c->level;
+    h.top_level = c->container_depth == 0;
     split_heading_id(c->buf, h);
     c->headings.push_back(std::move(h));
   }
+  if (is_container(type) && c->container_depth > 0) --c->container_depth;
   return 0;
 }
 

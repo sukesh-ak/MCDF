@@ -15,6 +15,18 @@ the code an implementation MUST raise. Messages are free-form; **codes are not**
 | `E_REQUIRED_SECTION_MISSING` | a section marked `required: true` has no matching heading |
 | `E_ASSET_PATH_ESCAPE` | a member path is absolute or contains `..` |
 
+**Only a top-level heading binds** (spec §4.2). An anchor carried by a heading
+inside a block quote, a list item or a table cell does not bind a section — to a
+validator that heading is absent, and the codes above are raised naming the
+*section*, never the nesting. The rule is what lets an implementation reach Core
+without a CommonMark parser: finding top-level headings is a line scan, while
+finding nested ones means tracking container blocks, lazy continuation and
+list-item content indentation. Scored by `invalid/section-nested-heading`.
+
+Note what the rule does **not** say: a nested heading is still a heading. It
+renders as one and still carries its anchor as an `id` in the canonical render
+(spec §10.4). Binding is the only thing that ignores it.
+
 ## Integrity profile
 
 | Code | Raised when |

@@ -123,6 +123,34 @@ TEST_CASE("a required section with no matching heading is reported") {
   CHECK(has_code(*report, "E_REQUIRED_SECTION_MISSING"));
 }
 
+// Spec 4.2: a nested anchor does not bind. Two implementations disagreeing here
+// is the interop failure the whole format exists to prevent - the C reader has
+// no CommonMark parser and can only see top-level headings, so admitting nested
+// ones would have made a document valid for one implementation and invalid for
+// the other.
+TEST_CASE("an anchor on a nested heading does not bind a section") {
+  auto c = mcdf::DirectoryContainer::open(example_path());
+  REQUIRE(c.has_value());
+
+  mcdf::Document doc;
+  doc.has_content = true;
+  doc.headings.push_back({1, "Overview", "overview", true});
+  doc.headings.push_back({2, "Terms", "terms", false});   // inside a quote
+  doc.headings.push_back({3, "Appendix", "appendix", false});  // inside a list
+  doc.has_schema = true;
+  doc.schema.document_type = "contract";
+  doc.schema.sections.push_back({"overview", "Overview", false});
+  doc.schema.sections.push_back({"terms", "Terms", true});
+  doc.schema.sections.push_back({"appendix", "Appendix", false});
+
+  auto report = mcdf::validate(**c, doc, mcdf::Profile::kCore);
+  REQUIRE(report.has_value());
+  CHECK_FALSE(report->ok);
+  CHECK(has_code(*report, "E_REQUIRED_SECTION_MISSING"));  // terms
+  CHECK(has_code(*report, "E_SCHEMA_UNBOUND"));            // appendix
+  CHECK(report->issues.size() == 2);  // overview still binds
+}
+
 TEST_CASE("parse_profile round-trips names") {
   auto p = mcdf::parse_profile("integrity");
   REQUIRE(p.has_value());
