@@ -242,6 +242,39 @@ without the ones you don't looking like defects. What you must never do is
 report a profile as valid without running its checks — see
 [`errors.md`](errors.md).
 
+### If you are writing a reader
+
+The runner scores a CLI, which assumes a machine that can host one. A read-only
+implementation — an embedded reader, a viewer, anything that opens documents and
+never writes them — is conforming or not for narrower reasons, and this is the
+whole of it:
+
+1. **Open every container under [`vectors/valid/`](vectors/valid).** Index it,
+   list its members, and read each member's bytes. A valid document your reader
+   cannot open is a defect in the reader, whatever profile it claims.
+2. **Return the same bytes.** A member read must be byte-identical to the
+   member's stored content, at any offset and any length inside it. A partial
+   read is never reported as a success.
+3. **Refuse every container under [`vectors/invalid/`](vectors/invalid) without
+   crashing.** Report the code [`errors.md`](errors.md) names for the defect
+   where it names one, and some error where it does not. What is never
+   acceptable is accepting one.
+4. **Read nothing outside the container.** Not one byte past the end, past a
+   member's length, or past a caller's buffer — including on the malformed
+   inputs of (3), where a size field reaching past the end of the archive is the
+   whole point of the vector. On a part with no MMU this is a silent corruption
+   rather than a crash, so it cannot be left to a segfault to catch.
+5. **Never claim a profile you did not evaluate.** Report `E_UNIMPLEMENTED`, as
+   above. A reader with no cryptography is a perfectly conforming Core
+   implementation; one that reports Integrity as valid without hashing anything
+   is not.
+
+Points (3) and (4) are what a test suite tends to under-cover, because valid
+documents are the ones people have. Fuzz them instead of enumerating them: the
+repository's [corpus](../fuzz/corpus) seeds a coverage-guided run straight at
+the archive walk and the member parsers, and it is the same corpus the reference
+implementations are fuzzed from.
+
 > **Maintainers: the two runners are a pair.** `run.sh` and `run.ps1` perform
 > the same checks and must stay in step — a check added to one has to be added
 > to the other, or an implementation scores differently depending on who runs
