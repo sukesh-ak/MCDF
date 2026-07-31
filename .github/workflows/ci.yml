@@ -164,6 +164,100 @@ jobs:
       - name: Test
         run: ctest --test-dir build32 --output-on-failure
 
+  # The ESP-IDF port, compiled for the two parts it targets.
+  #
+  # This is the only automated proof in the repository that touches the vendor
+  # toolchain. There is no simulator here by decision, and device testing
+  # happens by hand off CI - which raises what this job is worth and is the
+  # argument for keeping it strict rather than permissive: warnings as errors,
+  # every gate configuration that ships, and both architectures.
+  #
+  # Both, not one: esp32s3 is Xtensa and esp32p4 is RISC-V. A clean build of one
+  # says nothing about the other, so neither is optional and a green tick on
+  # half of this is not a green tick.
+  #
+  # What it proves is that the code compiles and links under IDF's warning set,
+  # which is stricter than the host matrix in the places that bite embedded C.
+  # It proves nothing about runtime behaviour on silicon - that is covered from
+  # the other side, by the host matrix, the 32-bit job and the fuzzers, which
+  # between them execute every parser, both profiles and the event stream.
+  #
+  # The image tag tracks the release branch rather than pinning a patch version.
+  # A job whose purpose is catching embedded-C problems early should see the
+  # vendor's warning set tighten early too.
+  idf:
+    name: idf (esp32s3 + esp32p4)
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Eight builds share one copy of IDF's own components per target, so the
+      # cache is most of the job's wall clock.
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: idf-ccache-${{ hashFiles('micro/**', '.github/workflows/ci.yml') }}
+          restore-keys: idf-ccache-
+
+      - name: Build every gate configuration, both targets
+        shell: bash
+        env:
+          IDF_CCACHE_ENABLE: "1"
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 500M
+        # Failures are collected rather than fatal on the first one: when the
+        # Xtensa build passes and the RISC-V build does not, seeing both is the
+        # whole diagnosis.
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd micro/port/esp-idf/example
+          failed=()
+          for target in esp32s3 esp32p4; do
+            for cfg in core:OFF:OFF core-integrity:ON:OFF core-render:OFF:ON all-on:ON:ON; do
+              name=${cfg%%:*}; rest=${cfg#*:}
+              integrity=${rest%%:*}; render=${rest##*:}
+              echo "::group::$target $name (INTEGRITY=$integrity RENDER=$render)"
+              if idf.py -B "build-$target-$name" \
+                        -D SDKCONFIG="sdkconfig.$target.$name" \
+                        -D MCDF_MICRO_WERROR=ON \
+                        -D MCDF_MICRO_ENABLE_INTEGRITY="$integrity" \
+                        -D MCDF_MICRO_ENABLE_RENDER="$render" \
+                        set-target "$target" build; then
+                echo "::endgroup::"
+              else
+                echo "::endgroup::"
+                echo "::error::$target $name failed to build"
+                failed+=("$target/$name")
+              fi
+            done
+          done
+          if [ ${#failed[@]} -ne 0 ]; then
+            printf 'failed: %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+      # The size number that actually matters, from the cross-toolchain: the
+      # linux job prints the host one, which is only ever a trend line. This is
+      # what the part pays. Reported, not asserted - a threshold in CI would
+      # fail on the day someone adds a feature on purpose.
+      - name: Report .text per target and gate configuration
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd micro/port/esp-idf/example
+          for lib in build-*/esp-idf/mcdf_micro/libmcdf_micro.a; do
+            [ -e "$lib" ] || continue
+            cfg=${lib#build-}; cfg=${cfg%%/*}
+            case "$cfg" in
+              esp32p4*) size=riscv32-esp-elf-size ;;
+              *)        size=xtensa-esp32s3-elf-size ;;
+            esac
+            printf '== %s\n' "$cfg"
+            "$size" -t "$lib" | awk 'NR == 1 || $NF == "(TOTALS)"'
+          done
+
   # Coverage-guided fuzzing smoke: libFuzzer + ASan over the untrusted-input
   # surfaces (TAR unpack, YAML/JSON member parsers, markdown, the C reader).
   # Short seeded runs to catch regressions; longer campaigns are manual.
