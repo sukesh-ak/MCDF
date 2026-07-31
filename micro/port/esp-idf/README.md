@@ -92,9 +92,16 @@ the one place a gate costs RAM rather than just an answer.
 
 ## What is proved, and where
 
-CI compiles this for **esp32s3 and esp32p4**, in all four gate configurations,
-with warnings as errors. Both parts, not one: the S3 is Xtensa and the P4 is
-RISC-V, so a clean build of one says nothing about the other.
+CI compiles this on **ESP-IDF v6.0.1** for **esp32s3 and esp32p4**, in all four
+gate configurations, with warnings as errors. Both parts, not one: the S3 is
+Xtensa and the P4 is RISC-V, so a clean build of one says nothing about the
+other. The image is pinned to the version the maintainer flashes from, because
+device testing happens there by hand and the two toolchains agreeing is what
+makes a green tick mean something about real firmware.
+
+The manifests declare `idf: ">=5.0"` — the API level the port needs, since the
+core uses no vendor headers at all and the adapter uses only `esp_partition` and
+POSIX file calls. The pinned build is one version, not the range.
 
 That job proves the code compiles and links under the vendor toolchain's warning
 set, which is stricter than the host matrix in the places that bite embedded C.

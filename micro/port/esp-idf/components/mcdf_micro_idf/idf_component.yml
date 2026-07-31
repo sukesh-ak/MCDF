@@ -16,5 +16,7 @@ tags:
   - markdown
   - reader
   - ebook
+# The API level this needs - esp_partition and POSIX file calls, nothing newer.
+# See the note in the mcdf_micro manifest.
 dependencies:
   idf: ">=5.0"

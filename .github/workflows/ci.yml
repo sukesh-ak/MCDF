@@ -182,13 +182,17 @@ jobs:
   # the other side, by the host matrix, the 32-bit job and the fuzzers, which
   # between them execute every parser, both profiles and the event stream.
   #
-  # The image tag tracks the release branch rather than pinning a patch version.
-  # A job whose purpose is catching embedded-C problems early should see the
-  # vendor's warning set tighten early too.
+  # The image is pinned to an exact patch release, and to the one the maintainer
+  # runs on the bench. Because device testing happens there by hand, a green
+  # tick here should say something about the firmware that actually gets
+  # flashed - and it says less the further CI's toolchain drifts from that one.
+  # A moving branch tag would trade that for early warning of the vendor's
+  # warning set tightening, which is worth less than the two agreeing. Bump it
+  # deliberately, when the bench moves.
   idf:
     name: idf (esp32s3 + esp32p4)
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v5.5
+    container: espressif/idf:v6.0.1
     steps:
       - uses: actions/checkout@v5
 

@@ -23,5 +23,11 @@ tags:
   - markdown
   - reader
   - ebook
+# The floor states the ESP-IDF API level this component needs, and that is 5.0:
+# the core is plain C99 with no vendor headers at all, and the adapter uses only
+# esp_partition and POSIX file calls, all of which long predate it. It is not a
+# claim that every release in the range has been built - the compile job pins
+# one version on purpose, because what that job is for is agreeing with the
+# toolchain the firmware is flashed from.
 dependencies:
   idf: ">=5.0"
