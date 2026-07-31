@@ -1,5 +1,13 @@
 # MCDF — Markdown Container Document Format
 
+[![CI](https://img.shields.io/github/actions/workflow/status/sukesh-ak/MCDF/ci.yml?branch=main&label=CI)](https://github.com/sukesh-ak/MCDF/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sukesh-ak/MCDF?label=release)](https://github.com/sukesh-ak/MCDF/releases)
+[![Code licence](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
+[![Spec licence](https://img.shields.io/badge/spec-CSL--1.0-blue)](spec/LICENSE)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-f34b7d)](CMakeLists.txt)
+[![Platforms](https://img.shields.io/badge/desktop-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#build)
+[![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v6.0.1-e7352c)](micro/port/esp-idf/)
+
 Make working with documents easier for everyone. MCDF treats a document as a
 structured, versionable, signable, AI-native **container** — plain Markdown +
 YAML + JSON + assets — instead of a fixed-layout, print-first file.
@@ -29,11 +37,9 @@ The C++ runtime implements the full document pipeline — the `mcdf` CLI can
 (AES-256-GCM + HPKE), `audit`, and `render` (sanitized HTML + plain text with
 a provenance stamp).
 
-**MCDF Studio**, the native desktop editor, shows it all live: edit beside a
-Markdown preview while dockable panels track structure binding, per-file
-integrity, signatures, encryption, the audit chain, and conformance — type
-one character in a signed document and watch the signature break; rebuild and
-re-sign and watch it heal.
+**MCDF Studio**, the desktop editor, shows all of that live: you write next to a
+Markdown preview, with dockable panels tracking structure, per-file integrity,
+signatures, encryption, the audit chain and conformance as you type.
 
 Hardening is continuous: unit + determinism tests on three OSes, known-answer
 conformance vectors, and coverage-guided fuzzing (libFuzzer + ASan) over
@@ -54,7 +60,7 @@ every surface that parses untrusted input.
 - [x] `sign` — Ed25519 and ECDSA P-256 via `did:key`
 - [x] `encrypt` / `decrypt` — AES-256-GCM + HPKE
 - [x] `render` — canonical HTML and plain text with a provenance stamp
-- [x] Import — Markdown, EPUB and HTML (library API, exposed in Studio)
+- [x] Import — bring in Markdown, EPUB or HTML (from Studio, or the library)
 - [ ] RSA-PSS signatures
 - [ ] DOCX / PDF export
 - [ ] PDF import — a separate tool consuming `libmcdf`
@@ -71,10 +77,11 @@ every surface that parses untrusted input.
 - [x] `mcdf_micro` (C99) — Core, Integrity, and the Render event stream
 - [x] `mcdf_micro` as an ESP-IDF component — esp32s3 (Xtensa) and esp32p4
       (RISC-V), every feature-gate configuration, warnings as errors
-- [ ] `mcdf_micro` Signed — signature verification through a platform-supplied
-      primitive, so the library keeps zero crypto dependencies. Low priority: a
-      constrained reader that reports Core and Integrity honestly is already
-      useful, and says `E_UNIMPLEMENTED` for the rest rather than claiming it.
+- [ ] `mcdf_micro` Signed — checking signatures on the device itself. Low
+      priority: a small reader that does Core and Integrity properly, and admits
+      it has not checked the rest, is useful as it stands. If you need the trust
+      badge today, verify the file on a real computer before it ever reaches the
+      device.
 
 **Engineering**
 
@@ -83,39 +90,71 @@ every surface that parses untrusted input.
 - [x] A 32-bit ABI build, because every part `mcdf_micro` targets is 32-bit
 - [x] Reproducible Docker build; vcpkg overlay port
 
-**Not planned.** OCI as a container backend: the spec has exactly two container
-forms, and a registry *transports* the interchange file as a blob — that is
-tooling, not a backend, and needs only a registered media type.
+**Not planned:** OCI as a container backend. You can already push a `.mcdf` to a
+registry today — it travels as an ordinary blob, like any other file. That is a
+job for `oras push`, not a reason for the format to grow a third shape.
+
+## What's actually inside one
+
+A `.mcdf` file is a tar archive. Unpack it and there is nothing mysterious in
+there — you can read the whole thing in a text editor:
+
+```
+showcase.mcdf
+├── content.md          the document, in ordinary Markdown
+├── metadata.yaml       title, authors, dates
+├── schema.yaml         which sections the document promises to have
+├── manifest.json       a SHA-256 for each file it covers (not itself, the
+│                       log, or the signatures — those change afterwards)
+├── signatures/
+│   └── mcdf-project.sig    detached signature, signer named by did:key
+├── audit.log           who changed what, hash-chained so edits show
+├── audit.checkpoint    a signed point in that history
+└── assets/
+    └── mcdf-logo.png   images and anything else the document carries
+```
+
+`content.md` is the document. Everything else describes it or protects it, and
+you add each layer when you need it: hashes to tell whether a file changed, a
+signature to tell who wrote it, an encryption policy to keep parts of it sealed.
+That laddering is exactly what the five profiles name — how far up a document
+has climbed, and how far up a given tool can check. A reader on a microcontroller
+can do the first two rungs and say so honestly; it doesn't have to pretend to do
+the rest.
 
 ## Try it
 
-A complete, signed sample document lives in [`examples/`](examples/):
-[`showcase.mcdf`](examples/showcase.mcdf) demonstrates every feature —
-structure binding, the integrity manifest, a `did:key` signature, a
-hash-chained audit log, and an embedded image — and
-[`examples/showcase/`](examples/showcase/) is the same document unpacked, so
-you can read every member in your browser: it is just Markdown, YAML, and
-JSON. Open the `.mcdf` in MCDF Studio (or `mcdf inspect` it) and follow the
-[two-minute tamper demo](examples/README.md).
+[`showcase.mcdf`](examples/showcase.mcdf) in [`examples/`](examples/) is the
+document above, signed and complete. [`examples/showcase/`](examples/showcase/)
+is the same thing unpacked, so you can click through it on GitHub without
+installing anything.
+
+Then try breaking it. Open it in MCDF Studio (or run `mcdf inspect`), change one
+character of the text, and watch the signature go red; rebuild and re-sign and
+watch it come back. That is the [two-minute tamper demo](examples/README.md),
+and it is the fastest way to see the point of the whole format.
 
 ## Layout
 
 ```
-spec/          the MCDF specification (CSL-1.0)
-conformance/   schemas, test vectors, error taxonomy, runner
-examples/      a complete signed sample document (packed + unpacked)
-include/mcdf/  public library headers
-src/           libmcdf implementation (container, crypto, model, serialize, core)
-micro/         mcdf_micro — a portable C99 reader for microcontrollers
-               (no allocation, no filesystem, no dependencies)
-apps/          clients built on libmcdf
-  cli/           the `mcdf` command-line client
-  studio/        MCDF Studio — the Dear ImGui desktop editor
-                 (core/ is its GUI-free document engine, tested headlessly)
-  web/           MCDF Web — the accessible browser client (Svelte 5 + TypeScript)
-                 and mcdf-ts, an independent implementation of the format
-tests/         unit / determinism / conformance tests
-fuzz/          fuzz harnesses + seed corpus for the untrusted-input parsers
+MCDF/
+├── spec/            the specification itself (CSL-1.0)
+├── conformance/     schemas, test vectors, error taxonomy, and a runner that
+│                    scores any implementation, including yours
+├── examples/        the signed sample document, packed and unpacked
+├── include/mcdf/    public headers for libmcdf
+├── src/             libmcdf itself — container, crypto, model, serialize, core
+├── micro/           mcdf_micro, the C99 reader for microcontrollers
+│   └── port/esp-idf/    its ESP-IDF component and a runnable example
+├── apps/
+│   ├── cli/         the `mcdf` command
+│   ├── studio/      MCDF Studio, the desktop editor (core/ is its document
+│   │                engine with no GUI attached, so it can be tested headlessly)
+│   └── web/         MCDF Web, the browser client — and mcdf-ts, a second
+│                    implementation of the format written from the spec alone
+├── tests/           unit, determinism and conformance tests
+└── fuzz/            fuzz harnesses and seed corpus for the parsers that read
+                     untrusted input
 ```
 
 ## Implementing MCDF in another language
@@ -137,18 +176,18 @@ checkable. It is both a worked example for your own port and an npm library you
 can build on.
 
 **Twice, in fact.** [`mcdf_micro`](micro) is a **C99** reader small enough for a
-microcontroller — no allocation, no filesystem, no dependencies, and read-only
-forever. It reads the required TAR form through a caller-supplied callback and
-keeps its whole index in a caller-supplied arena, so an SD card, a flash
-partition and a host `FILE*` are the same three fields. It implements **Core and
-Integrity**, scores clean on those vectors, and reports `E_UNIMPLEMENTED` for
-the profiles it does not evaluate rather than claiming them; behind a feature
-gate it also hands `content.md` to a layout engine as a block/span event stream,
-a window at a time, so a reader's RAM is sized by its screen rather than by the
-documents it is given. It builds as an
-[ESP-IDF component](micro/port/esp-idf/) — for an Xtensa part and a RISC-V one
-alike. If your target is constrained, start there rather than from the C++
-engine.
+microcontroller: no allocation, no filesystem, no dependencies, and read-only
+forever. Bytes reach it through a callback you write, and its whole index lives
+in an arena you hand it, so an SD card, a flash partition and a plain `FILE*`
+all look the same from inside.
+
+It checks **Core and Integrity**, and answers `E_UNIMPLEMENTED` for the profiles
+it does not check rather than pretending. Turn on the render gate and it will
+feed `content.md` to your layout engine as a stream of block and span events, a
+screenful at a time — so the RAM you need depends on your display, not on how
+long a book someone hands you. It builds as an
+[ESP-IDF component](micro/port/esp-idf/) for both Xtensa and RISC-V parts. If
+your target is small, start here rather than with the C++ engine.
 
 ## MCDF Web — the accessible client
 
