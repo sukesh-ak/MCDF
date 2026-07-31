@@ -171,9 +171,7 @@ every surface that parses untrusted input.
 - [ ] RSA-PSS signatures
 - [ ] DOCX / PDF export
 - [ ] PDF import — a separate tool consuming `libmcdf`
-- [ ] "Save as MCDF" from other applications — an add-in that reads Word's own
-      headings, lists and tables and keeps that structure, with a
-      print-to-MCDF driver as the fallback for anything that can only print
+- [ ] Save as MCDF from Word and similar
 
 **Clients**
 

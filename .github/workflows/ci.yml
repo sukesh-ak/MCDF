@@ -2,11 +2,29 @@
 # Copyright (c) 2026 Sukesh Ashok Kumar and The MCDF Project
 name: CI
 
+# Docs-only pushes skip the matrix. Named files, not a `**/*.md` glob: most
+# Markdown here is test input - the conformance vectors and the fuzz corpus.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSING.md'
+      - 'NOTICE'
+      - 'examples/README.md'
+      - 'micro/README.md'
+      - 'micro/port/esp-idf/README.md'
+      - '.github/FUNDING.yml'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSING.md'
+      - 'NOTICE'
+      - 'examples/README.md'
+      - 'micro/README.md'
+      - 'micro/port/esp-idf/README.md'
+      - '.github/FUNDING.yml'
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref.
@@ -164,31 +182,17 @@ jobs:
       - name: Test
         run: ctest --test-dir build32 --output-on-failure
 
-  # The ESP-IDF port, compiled for the two parts it targets.
+  # The ESP-IDF port, both architectures: esp32s3 is Xtensa and esp32p4 is
+  # RISC-V, so a clean build of one says nothing about the other. Every shipped
+  # gate configuration, warnings as errors.
   #
-  # This is the only automated proof in the repository that touches the vendor
-  # toolchain. There is no simulator here by decision, and device testing
-  # happens by hand off CI - which raises what this job is worth and is the
-  # argument for keeping it strict rather than permissive: warnings as errors,
-  # every gate configuration that ships, and both architectures.
+  # There is no simulator by decision and device testing happens by hand, which
+  # makes this the only automated proof touching the vendor toolchain - hence
+  # strict. It proves compiling and linking, not behaviour on silicon; that is
+  # the host matrix, the 32-bit job and the fuzzers.
   #
-  # Both, not one: esp32s3 is Xtensa and esp32p4 is RISC-V. A clean build of one
-  # says nothing about the other, so neither is optional and a green tick on
-  # half of this is not a green tick.
-  #
-  # What it proves is that the code compiles and links under IDF's warning set,
-  # which is stricter than the host matrix in the places that bite embedded C.
-  # It proves nothing about runtime behaviour on silicon - that is covered from
-  # the other side, by the host matrix, the 32-bit job and the fuzzers, which
-  # between them execute every parser, both profiles and the event stream.
-  #
-  # The image is pinned to an exact patch release, and to the one the maintainer
-  # runs on the bench. Because device testing happens there by hand, a green
-  # tick here should say something about the firmware that actually gets
-  # flashed - and it says less the further CI's toolchain drifts from that one.
-  # A moving branch tag would trade that for early warning of the vendor's
-  # warning set tightening, which is worth less than the two agreeing. Bump it
-  # deliberately, when the bench moves.
+  # Pinned to the IDF version the bench runs, so a green tick here says
+  # something about the firmware that gets flashed. Bump it deliberately.
   idf:
     name: idf (esp32s3 + esp32p4)
     runs-on: ubuntu-latest
@@ -196,8 +200,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Eight builds share one copy of IDF's own components per target, so the
-      # cache is most of the job's wall clock.
+      # Eight builds share IDF's own components per target.
       - name: Cache ccache
         uses: actions/cache@v5
         with:
@@ -211,9 +214,8 @@ jobs:
           IDF_CCACHE_ENABLE: "1"
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 500M
-        # Failures are collected rather than fatal on the first one: when the
-        # Xtensa build passes and the RISC-V build does not, seeing both is the
-        # whole diagnosis.
+        # Failures are collected, not fatal on the first: when Xtensa passes
+        # and RISC-V does not, seeing both is the diagnosis.
         run: |
           . "$IDF_PATH/export.sh"
           cd micro/port/esp-idf/example
@@ -242,10 +244,8 @@ jobs:
             exit 1
           fi
 
-      # The size number that actually matters, from the cross-toolchain: the
-      # linux job prints the host one, which is only ever a trend line. This is
-      # what the part pays. Reported, not asserted - a threshold in CI would
-      # fail on the day someone adds a feature on purpose.
+      # The size the part actually pays, from the cross-toolchain; the linux
+      # job's host number is only a trend line. Reported, not asserted.
       - name: Report .text per target and gate configuration
         shell: bash
         run: |
