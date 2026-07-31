@@ -117,7 +117,8 @@ cmake -B build -S micro && cmake --build build && ctest --test-dir build
 
 Under ESP-IDF the same `CMakeLists.txt` registers a component instead — one
 build description, because a second would drift. Nothing in `src/` or
-`include/` knows ESP-IDF exists; the adapter that does arrives in `port/idf/`.
+`include/` knows ESP-IDF exists; the adapter that does arrives in
+`port/esp-idf/`.
 
 Two test targets, both run by `ctest`:
 
@@ -136,4 +137,4 @@ Two test targets, both run by `ctest`:
 The container reader is complete and host-buildable, covered by the suites
 above. Still to come, in order: the CLI the conformance kit scores and SHA-256
 behind `MCDF_MICRO_ENABLE_INTEGRITY`; the Markdown event stream behind
-`MCDF_MICRO_ENABLE_RENDER`; the ESP-IDF port under `port/idf/`.
+`MCDF_MICRO_ENABLE_RENDER`; the ESP-IDF port under `port/esp-idf/`.
