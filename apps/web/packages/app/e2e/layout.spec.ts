@@ -83,6 +83,51 @@ for (const viewport of [
   });
 }
 
+// The counterpart to the horizontal checks above, and it needs a *real* wheel
+// rather than `scrollTo`: `overflow: hidden` still permits programmatic
+// scrolling, so a scripted scroll reports movement on a page a user cannot
+// actually move. This measured a fixed page as broken until it used the wheel.
+for (const viewport of [
+  { name: 'wide', width: 1920, height: 1080 },
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'laptop', width: 1024, height: 768 },
+]) {
+  test(`the page itself does not scroll at ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto('./');
+    await openWide(page);
+
+    // Over the editor, away from the sidebar's own scroller.
+    await page.mouse.move(viewport.width * 0.25, viewport.height * 0.5);
+    await page.mouse.wheel(0, 1500);
+    await page.waitForTimeout(200);
+
+    // The symptom this guards against: the toolbar scrolling off the top and
+    // the footer riding up, leaving blank space below it.
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    const banner = await page.locator('.banner').boundingBox();
+    expect(banner?.y).toBe(0);
+    const footer = await page.locator('.contentinfo').boundingBox();
+    expect(Math.round((footer?.y ?? 0) + (footer?.height ?? 0))).toBe(viewport.height);
+  });
+}
+
+test('the sidebar scrolls on its own instead', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./');
+  await openWide(page);
+
+  // Pinning the page is only correct because the region that overflows still
+  // scrolls. Clipping the root without this would hide the lower panels
+  // outright, which is a worse bug than the one being fixed.
+  const sidebar = page.locator('.sidebar');
+  await expect(sidebar).toHaveJSProperty('scrollTop', 0);
+  await page.mouse.move(1350, 500);
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(200);
+  expect(await sidebar.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
 test('manifest content stays inside the sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('./');

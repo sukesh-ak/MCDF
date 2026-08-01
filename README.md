@@ -167,7 +167,7 @@ every surface that parses untrusted input.
 - [x] `encrypt` / `decrypt` — AES-256-GCM + HPKE
 - [x] `render` — canonical HTML and plain text with a provenance stamp
 - [x] Import — `create --from` a Markdown file, `import-epub`, `import-html`
-      (in Studio too, and in the library)
+      (in Studio and the browser client too, and in both libraries)
 - [ ] RSA-PSS signatures
 - [ ] DOCX / PDF export
 - [ ] PDF import — a separate tool consuming `libmcdf`
@@ -178,6 +178,9 @@ every surface that parses untrusted input.
 - [x] `mcdf` CLI — Windows, Linux, macOS
 - [x] MCDF Studio — the Dear ImGui desktop editor
 - [x] MCDF Web — accessible browser client, installable PWA
+- [x] Import in the browser — drop in Markdown, HTML or EPUB and get a
+      provenance-stamped document, with a report of what the conversion could
+      not carry over
 
 **Independent implementations**
 

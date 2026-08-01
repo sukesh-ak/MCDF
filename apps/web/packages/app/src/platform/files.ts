@@ -156,31 +156,43 @@ function withFallbackReason(file: OpenedFile | null, reason: string): OpenedFile
   return file === null ? null : { ...file, fellBackBecause: reason };
 }
 
-/** `<input type=file>` fallback: works everywhere, gives no writable handle. */
-export function openViaInput(accept = '.mcdf'): Promise<OpenedFile | null> {
+/**
+ * `<input type=file>` fallback: works everywhere, gives no writable handle.
+ *
+ * `multiple` is what importing needs — a Markdown or HTML file names its images
+ * by relative path, and a browser has no folder to look in, so the user selects
+ * the document and its images together.
+ */
+export function openFilesViaInput(accept = '.mcdf', multiple = false): Promise<OpenedFile[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
+    input.multiple = multiple;
     input.style.display = 'none';
     // Fires when the dialog closes with no selection in browsers that support
     // it; `change` covers the rest.
     input.addEventListener('cancel', () => {
       input.remove();
-      resolve(null);
+      resolve([]);
     });
     input.addEventListener('change', () => {
-      const file = input.files?.[0];
+      const files = [...(input.files ?? [])];
       input.remove();
-      if (file === undefined) {
-        resolve(null);
+      if (files.length === 0) {
+        resolve([]);
         return;
       }
-      void readBlob(file).then(resolve);
+      void Promise.all(files.map(readBlob)).then(resolve);
     });
     document.body.append(input);
     input.click();
   });
+}
+
+/** Single-file form: resolves to `null` when the user cancels. */
+export async function openViaInput(accept = '.mcdf'): Promise<OpenedFile | null> {
+  return (await openFilesViaInput(accept, false))[0] ?? null;
 }
 
 /**

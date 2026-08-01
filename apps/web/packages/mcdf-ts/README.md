@@ -188,6 +188,7 @@ handled explicitly.
 | Encryption | `encryptContainer`, `decryptContainer`, `readEncryptionPolicy`, `encryptedMembers`, `aes256gcmSeal`/`Open`, `hpkeSeal` |
 | Audit | `readAuditLog`, `auditAppend`, `auditVerify`, `auditCheckpoint`, `auditVerifyCheckpoint` |
 | Encoding | `base64urlEncode`/`Decode`, `base58btcEncode`/`Decode` |
+| Import (detection) | `detectImportFormat`, `IMPORT_EXTENSIONS`, `IMPORT_ACCEPT` |
 
 Node-only filesystem helpers live behind the `mcdf-ts/node` subpath, kept out of
 the main entry point so browser bundles never pull in `node:fs`:
@@ -195,6 +196,37 @@ the main entry point so browser bundles never pull in `node:fs`:
 ```ts
 import { openContainer, DirectoryContainer } from 'mcdf-ts/node';
 ```
+
+## Importing other formats
+
+The converters live behind `mcdf-ts/import`, so nothing that only reads and
+writes MCDF pays for them:
+
+```ts
+import { importEpub, importHtml, importMarkdown } from 'mcdf-ts/import';
+
+const { container, report } = await importEpub(bytes, {
+  now: new Date().toISOString().slice(0, 19) + 'Z',
+  actor: 'my-app',
+  source: 'book.epub',
+});
+
+console.log(report.title, report.chapters, report.notes);
+```
+
+Every import stamps `metadata.generated_by` and opens the audit log with an
+`IMPORTED` entry, and returns a `report` naming what it could not carry over —
+an import is a best-effort conversion, and the caller has to be able to say so.
+
+`importMarkdown` and `importHtml` take an optional `resolveAsset` callback for
+images the document references, so the library needs no filesystem access of its
+own; an EPUB carries its own and needs none. Both the ZIP reader and EPUB's XML
+scanner are in-house and dependency-free. HTML-to-Markdown is `turndown`, which
+uses the platform's own HTML parser — the browser's, or `@mixmark-io/domino`
+under Node — and ships no DOM implementation to a browser bundle.
+
+Format detection is deliberately *not* here but in the main entry point, so
+deciding whether to offer an import never loads a parser.
 
 ## Security notes
 
@@ -209,10 +241,21 @@ import { openContainer, DirectoryContainer } from 'mcdf-ts/node';
   authenticate rather than decrypting in the wrong place.
 - Verification never throws on malformed input: every failure is a structured
   verdict carrying its normative error code.
+- Importers parse untrusted input, so the ZIP reader refuses ZIP64, caps both
+  per-member and total expansion, and counts inflated bytes *as they stream* —
+  a header that understates a member's size is the ordinary shape of a zip
+  bomb, and checking the header alone would not catch it. References that climb
+  out of the archive resolve to nothing and are reported rather than read.
+- An importer never fetches anything. An external image stays an external link
+  in the Markdown rather than being pulled into the container, and scripts,
+  styles and embedded media are dropped rather than carried across as literal
+  HTML for a renderer to neutralise later.
 
 ## License
 
 Apache-2.0. Runtime dependencies: `@noble/hashes`, `@noble/curves`,
-`@hpke/core`, `js-yaml`, `micromark` — all MIT.
+`@hpke/core`, `js-yaml`, `micromark`, `turndown` — all MIT. `turndown` pulls
+`@mixmark-io/domino` (BSD-2-Clause) for Node only; it is excluded from browser
+builds by turndown's own `browser` field.
 
 [noble]: https://github.com/paulmillr/noble-curves

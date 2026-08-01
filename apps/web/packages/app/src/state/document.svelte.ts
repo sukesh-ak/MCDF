@@ -98,6 +98,12 @@ export class DocumentStore {
   /** Bumped whenever `#base` is replaced, so deriveds that read it re-run. */
   #baseRevision = $state(0);
 
+  /**
+   * Set for a document that has never been written anywhere — currently only an
+   * import. Cleared by `pack()`, which is the moment bytes leave the tab.
+   */
+  #unsaved = $state(false);
+
   fileName = $state('untitled.mcdf');
   content = $state('');
   metadata = $state<Metadata>(emptyMetadata());
@@ -140,10 +146,24 @@ export class DocumentStore {
     this.hasManifest = doc.hasManifest;
     this.storedManifest = doc.manifest;
     this.loaded = true;
+    this.#unsaved = false;
   }
 
   openTar(archive: Uint8Array, fileName: string): void {
     this.reset(MemoryContainer.fromTar(archive), fileName);
+  }
+
+  /**
+   * Adopts a container produced by an importer.
+   *
+   * Marked unsaved on purpose. An imported document exists only in this tab —
+   * there is no file behind it — so treating it as clean would let the
+   * beforeunload guard stay quiet while a whole converted book is one reload
+   * away from being lost.
+   */
+  adoptImported(container: MemoryContainer, fileName: string): void {
+    this.reset(container, fileName);
+    this.#unsaved = true;
   }
 
   newDocument(title: string): void {
@@ -188,6 +208,7 @@ export class DocumentStore {
 
   dirty = $derived.by((): boolean => {
     void this.#baseRevision;
+    if (this.#unsaved) return true;
     const working = this.working;
     const base = this.#base;
     const paths = new Set([...working.list(), ...base.list()]);
@@ -456,6 +477,7 @@ export class DocumentStore {
     const bytes = container.toTar();
     this.#base = container;
     this.#baseRevision++;
+    this.#unsaved = false;
     return bytes;
   }
 

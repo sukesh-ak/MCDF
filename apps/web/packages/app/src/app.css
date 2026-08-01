@@ -112,6 +112,26 @@ body {
   height: 100%;
 }
 
+/* The app shell is exactly one viewport tall and every region inside it that
+ * can grow — the sidebar, each pane, the preview — scrolls on its own. So on a
+ * screen wide enough for that layout the *page* must not scroll at all.
+ *
+ * This is belt as well as braces. The shell already sizes and clips itself, but
+ * a descendant's scrollable overflow was still reaching the root scroller: the
+ * layout painted correctly while the page scrolled the toolbar off the top into
+ * blank space below the footer. Clipping the root ends that outright, and costs
+ * nothing, because nothing out here is ever meant to scroll.
+ *
+ * The complement of the stacked layout's breakpoint rather than a second
+ * number, so the two cannot drift apart. Narrow screens stack the panels below
+ * the editor and scroll the page normally, which is the right behaviour there. */
+@media not all and (max-width: 60rem) {
+  html,
+  body {
+    overflow: hidden;
+  }
+}
+
 body {
   margin: 0;
   background: var(--bg-sunken);

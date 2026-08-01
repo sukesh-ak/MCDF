@@ -30,6 +30,10 @@ export default defineConfig({
           if (!id.includes('node_modules')) return undefined;
           if (id.includes('@codemirror/merge')) return 'diff';
           if (id.includes('@codemirror') || id.includes('@lezer')) return 'editor';
+          // The HTML-to-Markdown converter, reached only by an actual import.
+          // Most sessions never open a foreign document, and first paint has no
+          // business waiting on a parser they will not use.
+          if (id.includes('turndown')) return 'import';
           if (id.includes('micromark') || id.includes('mdast') || id.includes('unist')) {
             return 'markdown';
           }

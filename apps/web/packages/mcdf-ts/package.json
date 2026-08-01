@@ -1,6 +1,6 @@
 {
   "name": "mcdf-ts",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "An independent, dependency-light TypeScript implementation of the Markdown Container Document Format (MCDF): manifests, detached JWS signatures, HPKE encryption and audit chains. No DOM, runs in Node, browsers and workers.",
   "license": "Apache-2.0",
   "type": "module",
@@ -29,6 +29,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./import": {
+      "types": "./dist/import/index.d.ts",
+      "default": "./dist/import/index.js"
     },
     "./node": {
       "types": "./dist/node/fs-container.d.ts",
@@ -65,11 +69,13 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.5.0",
     "js-yaml": "^4.1.0",
-    "micromark": "^4.0.0"
+    "micromark": "^4.0.0",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.9.0",
+    "@types/turndown": "^5.0.5",
     "typescript": "^5.6.3",
     "vitest": "^3.0.5"
   }

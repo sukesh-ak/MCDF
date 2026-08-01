@@ -35,6 +35,24 @@ describe('DocumentStore', () => {
     expect(store.report.issues.map((i) => i.code)).toContain('E_REQUIRED_SECTION_MISSING');
   });
 
+  it('treats an imported document as unsaved until it is packed', async () => {
+    // An import exists only in this tab — there is no file behind it. Reporting
+    // it clean would leave the beforeunload guard silent while a whole
+    // converted book is one reload from being lost.
+    const { importMarkdown } = await import('mcdf-ts/import');
+    const { container } = await importMarkdown('# Imported {#i}\n\nBody.\n', {
+      now: '2026-08-01T00:00:00Z',
+    });
+
+    const store = new DocumentStore();
+    store.adoptImported(container, 'imported.mcdf');
+    expect(store.fileName).toBe('imported.mcdf');
+    expect(store.dirty).toBe(true);
+
+    store.pack();
+    expect(store.dirty).toBe(false);
+  });
+
   it('becomes dirty on edit and clean again after packing', () => {
     const store = withManifest();
     expect(store.dirty).toBe(false);

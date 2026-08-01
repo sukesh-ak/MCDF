@@ -19,9 +19,17 @@
     saveDocumentAs,
     writeHandle,
   } from './platform/files.ts';
+  import {
+    isImportable,
+    pickForImport,
+    runImport,
+    type ImportOutcome,
+    type PickedFile,
+  } from './platform/import.ts';
   import { announcer } from './state/announcer.svelte.ts';
   import { DocumentStore } from './state/document.svelte.ts';
   import AuditPanel from './views/AuditPanel.svelte';
+  import ConversionReport from './views/ConversionReport.svelte';
   import DiffPanel from './views/DiffPanel.svelte';
   import EncryptionPanel from './views/EncryptionPanel.svelte';
   import ManifestPanel from './views/ManifestPanel.svelte';
@@ -54,6 +62,15 @@
   /** Non-fatal: the file worked, just not through the preferred API. */
   let notice = $state('');
   let dragging = $state(false);
+  let importing = $state(false);
+  /**
+   * A finished conversion, held until the user has seen the report.
+   *
+   * Nothing is adopted before they accept it: an import is a lossy conversion,
+   * and replacing the open document with one silently would be the exact
+   * "never silently" the import rules forbid.
+   */
+  let pendingImport = $state<ImportOutcome | null>(null);
 
   const supportsPicker = hasFileSystemAccess();
   const secure = isSecureContextAvailable();
@@ -228,6 +245,64 @@
   }
 
   /**
+   * Converts a foreign document into MCDF.
+   *
+   * The selection may hold more than one file: a Markdown or HTML document
+   * names its images by relative path and a browser has no folder to look in,
+   * so the user brings them along and the first importable file is the
+   * document. An EPUB carries its own images and ignores the rest.
+   */
+  async function startImport(files: PickedFile[]): Promise<void> {
+    const document_ = files.find((file) => isImportable(file.name));
+    if (document_ === undefined) {
+      if (files.length > 0) {
+        report(
+          'None of those files is one this client can import. ' +
+            'Supported: Markdown (.md), HTML (.html) and EPUB (.epub).',
+        );
+      }
+      return;
+    }
+    if (store.dirty && !confirm('Discard unsaved changes and import another document?')) return;
+
+    importing = true;
+    error = '';
+    notice = '';
+    announcer.say(`Converting ${document_.name}…`);
+    try {
+      const companions = files.filter((file) => file !== document_);
+      pendingImport = await runImport(document_, companions);
+      announcer.say(
+        `Converted ${document_.name}. Review what came across, then open the document.`,
+        'assertive',
+      );
+    } catch (e) {
+      fail(e);
+    } finally {
+      importing = false;
+    }
+  }
+
+  function acceptImport(): void {
+    const outcome = pendingImport;
+    if (outcome === null) return;
+    pendingImport = null;
+    store.adoptImported(outcome.container, outcome.fileName);
+    handle = null;
+    lastIntegrity = null;
+    announcer.say(
+      `Opened ${outcome.fileName}, converted from ${outcome.report.source}. ` +
+        'It has not been saved yet.',
+    );
+  }
+
+  function cancelImport(): void {
+    const name = pendingImport?.report.source ?? 'the file';
+    pendingImport = null;
+    announcer.say(`Discarded the document converted from ${name}.`);
+  }
+
+  /**
    * Attaches a file as a container member under `assets/` and inserts a
    * reference to it. Studio has had this since day one; without it a browser
    * user can write `![x](assets/x.png)` but has no way to put the bytes in the
@@ -277,19 +352,35 @@
     announcer.say('Canonical manifest downloaded.');
   }
 
+  /**
+   * Drag-and-drop, routed by what was dropped.
+   *
+   * A `.mcdf` is opened; anything an importer recognises is converted. This is
+   * the interaction the browser is best at and the reason importing belongs
+   * here most of all — there is no CLI to fall back on in a tab.
+   */
   async function onDrop(e: DragEvent): Promise<void> {
     e.preventDefault();
     dragging = false;
-    const file = e.dataTransfer?.files?.[0];
-    if (file === undefined) return;
-    if (store.dirty && !confirm('Discard unsaved changes and open the dropped document?')) return;
+    const dropped = [...(e.dataTransfer?.files ?? [])];
+    if (dropped.length === 0) return;
+
     try {
-      const opened = await readBlob(file);
-      store.openTar(opened.bytes, opened.name);
+      const files = await Promise.all(dropped.map(readBlob));
+      const container = files.find((file) => file.name.toLowerCase().endsWith('.mcdf'));
+      if (container === undefined) {
+        await startImport(files.map((file) => ({ name: file.name, bytes: file.bytes })));
+        return;
+      }
+
+      if (store.dirty && !confirm('Discard unsaved changes and open the dropped document?')) {
+        return;
+      }
+      store.openTar(container.bytes, container.name);
       handle = null;
       lastIntegrity = null;
       error = '';
-      announcer.say(`Opened ${opened.name}.`);
+      announcer.say(`Opened ${container.name}.`);
     } catch (err) {
       fail(err);
     }
@@ -355,6 +446,7 @@
       {theme}
       onnew={newDocument}
       onopen={() => void open()}
+      onimport={() => void pickForImport().then(startImport)}
       onsave={() => void save()}
       onsaveas={() => void saveAs()}
       onviewchange={(v) => (view = v)}
@@ -374,6 +466,10 @@
       {notice}
       <button type="button" onclick={() => (notice = '')}>Dismiss</button>
     </p>
+  {/if}
+
+  {#if importing}
+    <p class="notice" role="status">Converting the file into MCDF…</p>
   {/if}
 
   {#if updateReady}
@@ -523,6 +619,15 @@
   </footer>
 </div>
 
+{#if pendingImport !== null}
+  <ConversionReport
+    report={pendingImport.report}
+    fileName={pendingImport.fileName}
+    onaccept={acceptImport}
+    oncancel={cancelImport}
+  />
+{/if}
+
 <!--
   Two live regions, always present in the DOM: a region inserted at the moment
   it gains text is unreliable across screen readers.
@@ -531,10 +636,21 @@
 <div class="visually-hidden" role="alert" aria-atomic="true">{announcer.assertive}</div>
 
 <style>
+  /* The shell owns the viewport: it is exactly one screen tall and never
+     scrolls. Every region inside it that can grow (the sidebar, each pane, the
+     preview) scrolls on its own, so the toolbar and the footer stay put.
+
+     `100dvh` rather than `height: 100%`, because the percentage chain only
+     works while `html`, `body` and `#app` all keep their own `height: 100%` —
+     three rules in another file that have to stay true for this one to hold.
+     `overflow: hidden` is the guarantee rather than the mechanism: nothing
+     should reach it, and if something ever does, the page still must not start
+     scrolling the header off the top. */
   .shell {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
   }
 
   .shell.dragging {
@@ -591,16 +707,25 @@
     font-size: 0.88rem;
   }
 
+  /* The row track has to be capped as deliberately as the columns are.
+     `min-height: 0` lets the *flex item* shrink, but the grid inside it still
+     lays out an implicit `auto` row, and an auto row sizes to its content — so
+     a tall sidebar makes the row taller than the workspace, overflows it, and
+     pushes the whole page past the viewport. The sidebar's `overflow-y: auto`
+     then has nothing to scroll, because it was never the thing constrained.
+     `minmax(0, 1fr)` pins the row to the container instead. */
   .workspace {
     flex: 1;
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
+    grid-template-rows: minmax(0, 1fr);
     min-height: 0;
   }
 
   .main {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     min-height: 0;
     border-right: 1px solid var(--border);
   }
@@ -688,8 +813,19 @@
   }
 
   @media (max-width: 60rem) {
+    /* Stacked rather than side by side, and here the page *should* scroll:
+       squeezing an editor and nine panels into one narrow viewport by making
+       each its own scroller is worse than one honest page scroll. So the shell
+       is released from the viewport and both children size to their content. */
+    .shell {
+      height: auto;
+      min-height: 100dvh;
+      overflow: visible;
+    }
+
     .workspace {
       grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto;
     }
 
     .main.split {

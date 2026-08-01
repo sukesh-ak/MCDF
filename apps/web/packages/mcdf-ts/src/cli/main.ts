@@ -34,8 +34,11 @@ import { renderCanonical, isRenderFormat, type RenderError } from '../core/rende
 import { signContainer, signaturePath, verifyContainer } from '../core/sign.js';
 import { isProfile, validate, PROFILES, type Profile } from '../core/validate.js';
 import { DirectoryContainer, openContainer, toMemoryContainer } from '../node/fs-container.js';
+import { MCDF_TS_VERSION } from '../version.js';
 
-const VERSION = '0.4.0';
+// Shared with the importers' `generated_by` stamp, so a released build cannot
+// report one version in `--version` and another in a document's provenance.
+const VERSION = MCDF_TS_VERSION;
 
 const USAGE = `mcdf-ts ${VERSION} — independent TypeScript implementation of MCDF
 

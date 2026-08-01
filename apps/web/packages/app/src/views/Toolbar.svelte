@@ -14,6 +14,7 @@
     theme: Theme;
     onnew: () => void;
     onopen: () => void;
+    onimport: () => void;
     onsave: () => void;
     onsaveas: () => void;
     onviewchange: (view: View) => void;
@@ -39,6 +40,7 @@
     theme,
     onnew,
     onopen,
+    onimport,
     onsave,
     onsaveas,
     onviewchange,
@@ -50,6 +52,9 @@
   <div class="group">
     <button type="button" onclick={onnew}>New</button>
     <button type="button" onclick={onopen}>Open…</button>
+    <button type="button" onclick={onimport} title="Convert Markdown, HTML or EPUB into MCDF">
+      Import…
+    </button>
     <button type="button" class="primary" onclick={onsave} disabled={!dirty && canSaveInPlace}>
       Save
     </button>

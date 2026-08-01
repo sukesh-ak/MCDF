@@ -5,6 +5,7 @@
 // specification and conformance kit rather than bound to the C++ engine. No DOM
 // dependencies: the same build runs in Node, a browser and a worker.
 
+export * from './version.js';
 export * from './model/types.js';
 export * from './util/bytes.js';
 export * from './container/tar.js';
@@ -29,3 +30,8 @@ export * from './core/encrypt.js';
 export * from './core/audit.js';
 export * from './core/render.js';
 export * from './core/validate.js';
+// Import *detection* and its types only — never a converter. A client decides
+// whether a file is importable long before it converts one, and that decision
+// must not pull an HTML parser into the entry bundle. The converters live at
+// the `mcdf-ts/import` subpath.
+export * from './import/types.js';

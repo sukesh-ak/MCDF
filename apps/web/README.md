@@ -114,6 +114,35 @@ Everything below is shipped and covered by CI:
   re-sign demo.
 - HPKE + AES-GCM encryption, and the hash-chained audit log with checkpoints.
 - Diff view, PWA and offline support, Pages deployment, a WCAG audit.
+- Import from Markdown, HTML and EPUB, with a conversion report.
+
+## Importing
+
+Drop a `.md`, `.html` or `.epub` file on the window, or use **Import…**. A
+`.mcdf` is opened; anything else is converted.
+
+Three things the conversion always does, because an import is a best-effort
+conversion and pretending otherwise is the failure mode:
+
+- **It shows a report first.** What the title and author came out as, how many
+  sections and images survived, and a plain list of what did not come across —
+  CSS and page layout, MathML, embedded media, tables too irregular to be pipe
+  tables. Nothing is adopted until you accept it.
+- **It stamps provenance.** `metadata.generated_by` names the converter and its
+  version, and the new document's audit log opens with an `IMPORTED` entry.
+- **It leaves the document unsaved.** A converted document exists only in this
+  tab until you save it, and the app says so rather than looking clean.
+
+EPUB carries its own images. Markdown and HTML reference theirs by relative
+path, and a browser has no folder to look in — so the picker takes a multiple
+selection: choose the document and its images together. Anything not found is
+reported in the conversion report, and the link is left pointing at the member
+that would have been there, so attaching the file later repairs it.
+
+Structure survives where the source had structure. An EPUB's spine becomes
+reading order, each chapter becomes a top-level heading carrying a `{#id}`, and
+the generated `schema.yaml` binds to those anchors — so a freshly imported book
+is Core-valid without anyone fixing it up first.
 
 ## Trust, confidentiality and history
 
@@ -166,11 +195,23 @@ never ships).
 In-house rather than dependencies: deterministic USTAR, RFC 8785 canonical JSON,
 content canonicalization, the YAML *writer* (byte-parity with the C++ emitter is
 required, and no general-purpose emitter guarantees a byte layout), base64url
-and base58btc, `did:key`, detached JWS, the PKCS#8 reader/writer, and the
-service worker.
+and base58btc, `did:key`, detached JWS, the PKCS#8 reader/writer, the ZIP reader
+and EPUB's XML scanner, and the service worker.
 
 Crypto primitives are **not** in-house: `@noble/curves` for Ed25519 and P-256,
 `@hpke/core` for RFC 9180, and WebCrypto for AES-256-GCM and randomness.
+Neither is HTML-to-Markdown: `turndown` does that, because it is a large pile of
+well-trodden edge cases with nothing MCDF-specific in it — the opposite of the
+ZIP and XML readers next to it, which are small, bounded, and had to be
+dependency-free to run everywhere `mcdf-ts` runs. ZIP decompression is the
+platform's `DecompressionStream`, so no compression library is needed at all.
+
+turndown resolves a DOM per platform (the browser's own; `@mixmark-io/domino`
+under Node) and declares `"browser": { "@mixmark-io/domino": false }`, so the
+shipped bundle contains no DOM implementation — checked in the build output, not
+assumed. The converters are in their own lazily-loaded chunk: most sessions
+never import a foreign document, and first paint has no business waiting on a
+parser they will not use.
 
 ## Deploying
 
